@@ -101,17 +101,26 @@ def build_cross_holding_matrix(conn, report_period=None):
 
     # 按机构 + ticker 聚合（同一机构可能在多条记录中持有同一 ticker）
     df = df.groupby(
-        ["institution_name", "institution_cik", "ticker", "style_label", "activism_level"],
+        ["institution_name", "institution_cik", "ticker"],
         dropna=False,
     )["value_x1000"].sum().reset_index()
 
     # 透视：机构 → 行，竞品 ticker → 列
     matrix = df.pivot_table(
-        index=["institution_name", "institution_cik", "style_label", "activism_level"],
+        index=["institution_name", "institution_cik"],
         columns="ticker",
         values="value_x1000",
         fill_value=0,
     ).reset_index()
+
+    # 附加风格标签（从 institution_styles 表直接获取，避免 NaN 导致 pivot 错位）
+    styles = pd.read_sql_query("""
+        SELECT institution_cik, style_label, activism_level
+        FROM institution_styles
+    """, conn)
+    matrix = matrix.merge(styles, on="institution_cik", how="left")
+    matrix["style_label"] = matrix["style_label"].fillna("Unclassified")
+    matrix["activism_level"] = matrix["activism_level"].fillna("")
 
     # 确保所有 5 家竞品列都存在
     for tk in COMPETITOR_TICKERS:
@@ -644,7 +653,8 @@ def generate_cross_holding_report(conn):
     lines.append(f"4. **数据时滞**：13F 数据滞后约 45 天（季末后 45 天申报截止）。")
     lines.append(f"   本报告反映的是 **{period_str}** 季末的机构持仓情况，非实时持仓。")
     lines.append(f"")
-    lines.append(f"5. **激进投资者标注**：仅基于静态种子名单（{len([c for c in matrix['activism_level'].unique() if c and c != 'None'])} 家已知 activist），")
+    activist_count = len(matrix[(matrix['activism_level'].notna()) & (matrix['activism_level'] != '')])
+    lines.append(f"5. **激进投资者标注**：仅基于静态种子名单（{activist_count} 家已知 activist），")
     lines.append(f"   不保证覆盖所有有 activist 行为的机构。")
     lines.append(f"")
 
