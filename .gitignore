@@ -1,0 +1,14 @@
+data/*.db
+data/*.db-shm
+data/*.db-wal
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.egg-info/
+.DS_Store
+.claude/
+.streamlit/secrets.toml
+.edgar/
+hisel_cache/
