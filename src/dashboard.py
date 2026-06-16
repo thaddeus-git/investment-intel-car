@@ -112,8 +112,14 @@ def load_data():
         ORDER BY isig.report_period DESC
     """, conn)
 
+    # 模块 F: 交叉持股矩阵
+    cross_matrix = pd.read_sql_query("""
+        SELECT * FROM cross_holding_matrix
+        ORDER BY total_value_x1000 DESC
+    """, conn)
+
     conn.close()
-    return filings, financials, events, ec_notes, insider_txns, form144, insider_sent, inst_holdings, inst_signal
+    return filings, financials, events, ec_notes, insider_txns, form144, insider_sent, inst_holdings, inst_signal, cross_matrix
 
 
 def latest_update(events_df, filings_df):
@@ -521,6 +527,281 @@ def render_insider_institutional(insider_sent_df, insider_txns_df, form144_df,
 
 
 # ═══════════════════════════════════════════════════════════
+# Block 7: 交叉持股全景（模块 F）
+# ═══════════════════════════════════════════════════════════
+
+def render_cross_holding(cross_matrix_df, inst_holdings_df, inst_signal_df):
+    """📊 交叉持股全景 — 以 IHS Markit Cross Ownership Report 为模板。"""
+    st.subheader("📊 交叉持股全景 (13F)")
+
+    if cross_matrix_df.empty:
+        st.info("暂无交叉持股数据。请运行 13F 采集（需等待季末+50天）。")
+        return
+
+    # ── 概览卡片 ──
+    latest_period = cross_matrix_df["report_period"].max() if "report_period" in cross_matrix_df.columns else "未知"
+    total_insts = len(cross_matrix_df)
+
+    st.caption(f"报告期: **{latest_period}**  |  覆盖机构: **{total_insts}** 家（种子池 25 家中的有持仓者）")
+
+    # 从 institutional_signal 汇总统计
+    if not inst_signal_df.empty:
+        latest_sig_period = inst_signal_df["report_period"].max()
+        latest_sigs = inst_signal_df[inst_signal_df["report_period"] == latest_sig_period]
+        total_new = int(latest_sigs["new_positions"].sum())
+        total_exited = int(latest_sigs["exited_positions"].sum())
+        total_inc = int(latest_sigs["increased_positions"].sum())
+        total_dec = int(latest_sigs["decreased_positions"].sum())
+    else:
+        total_new = total_exited = total_inc = total_dec = 0
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        st.metric("覆盖机构", f"{total_insts} 家")
+    with col2:
+        st.metric("新建仓", f"+{total_new}")
+    with col3:
+        st.metric("退出", f"-{total_exited}", delta=f"-{total_exited}", delta_color="inverse")
+    with col4:
+        st.metric("加仓 >5%", f"{total_inc} 家")
+    with col5:
+        st.metric("减仓 >5%", f"{total_dec} 家", delta=f"-{total_dec}", delta_color="inverse")
+
+    st.divider()
+
+    # ── Tabs 切换 ──
+    tab_names = ["📋 Top Holders", "📈 QoQ 变动", "🟢 Top Buyers", "🔴 Top Sellers", "🆕 Init / 💀 Liq"]
+    tabs = st.tabs(tab_names)
+
+    competitor_tickers = ["CVNA", "KMX", "AN", "UXIN", "ATHM"]
+
+    # ── Tab 1: Top Holders 热力图 + 表格 ──
+    with tabs[0]:
+        st.markdown("#### 机构 × 竞品 持仓矩阵")
+
+        if not cross_matrix_df.empty:
+            # 热力图
+            heatmap_data = cross_matrix_df[competitor_tickers].copy()
+            # 转为百万美元
+            heatmap_data = heatmap_data.apply(lambda col: col / 1000)  # x1000 → M
+
+            labels = cross_matrix_df["institution_name"].tolist()
+
+            import plotly.graph_objects as go
+            fig = go.Figure(data=go.Heatmap(
+                z=heatmap_data.values,
+                x=competitor_tickers,
+                y=labels,
+                colorscale="Blues",
+                hovertemplate="机构: %{y}<br>竞品: %{x}<br>持仓: $%{z:,.1f}M<extra></extra>",
+                colorbar=dict(title="$M"),
+            ))
+            fig.update_layout(
+                height=max(400, 30 * len(labels)),
+                margin=dict(l=20, r=20, t=10, b=20),
+                xaxis=dict(side="top", title=""),
+                yaxis=dict(title="", tickfont=dict(size=11)),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # 表格
+            with st.expander("📋 数据表格"):
+                display_cols = (
+                    ["institution_name", "style_label", "activism_level", "turnover_proxy"]
+                    + competitor_tickers
+                    + ["total_value_x1000"]
+                )
+                available = [c for c in display_cols if c in cross_matrix_df.columns]
+                view = cross_matrix_df[available].copy()
+
+                # 格式化
+                for tk in competitor_tickers:
+                    if tk in view.columns:
+                        view[tk] = view[tk].apply(
+                            lambda x: f"${x/1000:,.1f}M" if pd.notna(x) and x > 0 else "-"
+                        )
+                if "total_value_x1000" in view.columns:
+                    view["total_value_x1000"] = view["total_value_x1000"].apply(
+                        lambda x: f"${x/1000:,.1f}M" if pd.notna(x) and x > 0 else "-"
+                    )
+
+                st.dataframe(view, use_container_width=True, hide_index=True)
+
+    # ── Tabs 2-5: 基于 inst_holdings_df 实时计算 ──
+    # 计算 QoQ 变动（如果存在两期数据）
+    qoq_data = None
+    if not inst_holdings_df.empty:
+        periods = sorted(inst_holdings_df["report_period"].dropna().unique(), reverse=True)
+        if len(periods) >= 2:
+            curr_p, prev_p = periods[0], periods[1]
+            # 按 institution_cik × ticker 聚合
+            curr_agg = inst_holdings_df[inst_holdings_df["report_period"] == curr_p].groupby(
+                ["institution_cik", "institution_name", "ticker"]
+            )["value_x1000"].sum().reset_index()
+            prev_agg = inst_holdings_df[inst_holdings_df["report_period"] == prev_p].groupby(
+                ["institution_cik", "ticker"]
+            )["value_x1000"].sum().reset_index()
+            prev_agg.rename(columns={"value_x1000": "prev_value_x1000"}, inplace=True)
+
+            qoq_merged = curr_agg.merge(
+                prev_agg, on=["institution_cik", "ticker"], how="outer"
+            )
+            qoq_merged["curr_value"] = qoq_merged["value_x1000"].fillna(0)
+            qoq_merged["prev_value"] = qoq_merged["prev_value_x1000"].fillna(0)
+            qoq_merged["delta"] = qoq_merged["curr_value"] - qoq_merged["prev_value"]
+            # 机构名 fill
+            if "institution_name" not in qoq_merged.columns:
+                qoq_merged["institution_name"] = qoq_merged["institution_cik"]
+
+            qoq_data = qoq_merged[qoq_merged["delta"].abs() > 0].sort_values(
+                "delta", key=abs, ascending=False
+            )
+
+    # ── Tab 2: QoQ 变动 ──
+    with tabs[1]:
+        st.markdown("#### QoQ 持仓变动")
+        if qoq_data is None or qoq_data.empty:
+            st.info("需要至少两期 13F 数据才能显示 QoQ 变动。")
+        else:
+            st.caption(f"对比期: {periods[1]} → {periods[0]}")
+            display = qoq_data.head(30).copy()
+            display["Δ ($K)"] = display["delta"].apply(lambda x: f"{x:+,.0f}" if x != 0 else "-")
+            display["当前 ($K)"] = display["curr_value"].apply(lambda x: f"{x:,.0f}")
+            display["上期 ($K)"] = display["prev_value"].apply(lambda x: f"{x:,.0f}")
+            st.dataframe(
+                display[["institution_name", "ticker", "当前 ($K)", "上期 ($K)", "Δ ($K)"]].rename(
+                    columns={"institution_name": "机构", "ticker": "竞品"}
+                ),
+                use_container_width=True, hide_index=True,
+            )
+
+    # ── Tab 3: Top Buyers ──
+    with tabs[2]:
+        st.markdown("#### Top Peer Buyers（增持排名）")
+        if qoq_data is None or qoq_data.empty:
+            st.info("需要至少两期 13F 数据。")
+        else:
+            buyers = qoq_data[qoq_data["delta"] > 0].groupby(
+                ["institution_cik", "institution_name"]
+            )["delta"].sum().reset_index().sort_values("delta", ascending=False).head(25)
+
+            # 按竞品展开
+            buyers_detail = qoq_data[qoq_data["institution_cik"].isin(buyers["institution_cik"])]
+            buyers_pivot = buyers_detail.pivot_table(
+                index=["institution_cik", "institution_name"],
+                columns="ticker", values="delta", fill_value=0
+            ).reset_index()
+
+            buyers_out = buyers.merge(buyers_pivot, on=["institution_cik", "institution_name"], how="left")
+            for tk in competitor_tickers:
+                if tk not in buyers_out.columns:
+                    buyers_out[tk] = 0.0
+
+            buyers_out.insert(0, "Rank", range(1, len(buyers_out) + 1))
+            display = buyers_out[["Rank", "institution_name"] + competitor_tickers + ["delta"]].copy()
+            for tk in competitor_tickers:
+                display[tk] = display[tk].apply(lambda x: f"${x/1000:+,.1f}M" if x != 0 else "-")
+            display["delta"] = display["delta"].apply(lambda x: f"${x/1000:,.1f}M")
+
+            st.dataframe(
+                display.rename(columns={"institution_name": "机构", "delta": "总增持"}),
+                use_container_width=True, hide_index=True,
+            )
+
+    # ── Tab 4: Top Sellers ──
+    with tabs[3]:
+        st.markdown("#### Top Peer Sellers（减持排名）")
+        if qoq_data is None or qoq_data.empty:
+            st.info("需要至少两期 13F 数据。")
+        else:
+            sellers = qoq_data[qoq_data["delta"] < 0].groupby(
+                ["institution_cik", "institution_name"]
+            )["delta"].sum().reset_index().sort_values("delta", ascending=True).head(25)
+
+            sellers_detail = qoq_data[qoq_data["institution_cik"].isin(sellers["institution_cik"])]
+            sellers_pivot = sellers_detail.pivot_table(
+                index=["institution_cik", "institution_name"],
+                columns="ticker", values="delta", fill_value=0
+            ).reset_index()
+
+            sellers_out = sellers.merge(sellers_pivot, on=["institution_cik", "institution_name"], how="left")
+            for tk in competitor_tickers:
+                if tk not in sellers_out.columns:
+                    sellers_out[tk] = 0.0
+
+            sellers_out.insert(0, "Rank", range(1, len(sellers_out) + 1))
+            display = sellers_out[["Rank", "institution_name"] + competitor_tickers + ["delta"]].copy()
+            for tk in competitor_tickers:
+                display[tk] = display[tk].apply(lambda x: f"${x/1000:+,.1f}M" if x != 0 else "-")
+            display["delta"] = display["delta"].apply(lambda x: f"${abs(x)/1000:,.1f}M")
+
+            st.dataframe(
+                display.rename(columns={"institution_name": "机构", "delta": "总减持"}),
+                use_container_width=True, hide_index=True,
+            )
+
+    # ── Tab 5: Initiations & Liquidations ──
+    with tabs[4]:
+        col_init, col_liq = st.columns(2)
+
+        with col_init:
+            st.markdown("##### 🆕 新建仓 (Initiations)")
+            if qoq_data is None or qoq_data.empty:
+                st.info("需要至少两期数据。")
+            else:
+                # Initiation: 上期无、本期有
+                inits = qoq_merged[qoq_merged["prev_value_x1000"].isna() | (qoq_merged["prev_value_x1000"] == 0)]
+                inits = inits[inits["value_x1000"] > 0].sort_values("value_x1000", ascending=False).head(10)
+                if inits.empty:
+                    st.info("无新建仓记录。")
+                else:
+                    display = inits[["institution_name", "ticker", "value_x1000"]].copy()
+                    display["市值"] = display["value_x1000"].apply(lambda x: f"${x/1000:,.1f}M")
+                    st.dataframe(
+                        display[["institution_name", "ticker", "市值"]].rename(
+                            columns={"institution_name": "机构", "ticker": "竞品"}
+                        ),
+                        use_container_width=True, hide_index=True,
+                    )
+
+        with col_liq:
+            st.markdown("##### 💀 清仓 (Liquidations)")
+            if qoq_data is None or qoq_data.empty:
+                st.info("需要至少两期数据。")
+            else:
+                # Liquidation: 上期有、本期无
+                liqs = qoq_merged[qoq_merged["value_x1000"].isna() | (qoq_merged["value_x1000"] == 0)]
+                liqs = liqs[liqs["prev_value_x1000"] > 0].sort_values("prev_value_x1000", ascending=False).head(10)
+                if liqs.empty:
+                    st.info("无清仓记录。")
+                else:
+                    display = liqs[["institution_name", "ticker", "prev_value_x1000"]].copy()
+                    display["上期市值"] = display["prev_value_x1000"].apply(lambda x: f"${x/1000:,.1f}M")
+                    st.dataframe(
+                        display[["institution_name", "ticker", "上期市值"]].rename(
+                            columns={"institution_name": "机构", "ticker": "竞品"}
+                        ),
+                        use_container_width=True, hide_index=True,
+                    )
+
+    st.divider()
+
+    # ── 免责声明 ──
+    with st.expander("⚠️ 免责声明与差距说明"):
+        st.markdown("""
+        1. **机构覆盖范围**：本看板仅覆盖 Top 25 家种子机构（13F 申报人），不代表完整机构持有人全景。IHS Markit 报告覆盖全市场 ~5,000 家 13F 申报人。
+
+        2. **投资风格标签**：看板中的风格标签（Index / Active / Broker）为基于实体类型的**简化分类**，非 IHS Markit 专业风格标签（Value / Growth / GARP / Aggressive Growth 等 12 类）。详细差距说明见 `prd/gap-analysis-ihs-markit.md`。
+
+        3. **Turnover Proxy**：基于 QoQ 13F 快照的持仓变动率估算（3 档：Low / Medium / High），非精确 portfolio turnover。IHS Markit 基于 12 个月日度交易数据计算 4 档分类。
+
+        4. **数据时滞**：13F 数据滞后约 45 天。看板反映的是季末机构持仓情况，**非实时持仓**。
+
+        5. **激进投资者标注**：仅基于静态种子名单（~8 家已知 activist），不保证覆盖所有有 activist 行为的机构。
+        """)
+
+
+# ═══════════════════════════════════════════════════════════
 # 主页面
 # ═══════════════════════════════════════════════════════════
 
@@ -530,7 +811,7 @@ def main():
 
     # 加载数据
     with st.spinner("加载数据..."):
-        filings, financials, events, ec, insider_txns, form144, insider_sent, inst_holdings, inst_signal = load_data()
+        filings, financials, events, ec, insider_txns, form144, insider_sent, inst_holdings, inst_signal, cross_matrix = load_data()
         st.session_state["filings"] = filings
         st.session_state["events"] = events
 
@@ -573,6 +854,11 @@ def main():
         insider_sent, insider_txns, form144,
         inst_signal, inst_holdings,
     )
+
+    st.divider()
+
+    # Block 7: 交叉持股全景（模块 F）
+    render_cross_holding(cross_matrix, inst_holdings, inst_signal)
 
 
 if __name__ == "__main__":

@@ -152,3 +152,53 @@ SCHEDULE_13F = {
     3: (9, 30, 11, 15),  # Q3: 季末 9/30，11/15 触发
     4: (12, 31, 2, 15),  # Q4: 季末 12/31，次年 2/15 触发
 }
+
+# ── 模块 F：交叉持股分析 — 机构风格静态标签 ──
+# ⚠️ 这是基于实体类型的简化分类，非 IHS Markit 专业风格标签。
+# 详细差距说明见 /Users/liuming/sec/prd/gap-analysis-ihs-markit.md
+
+# 激进投资者名单（来源：公开 13D 记录 / WhaleWisdom）
+# activism_level: "often" = 有多次 activist campaign 记录, "occasional" = 偶尔参与
+ACTIVIST_INSTITUTIONS = {
+    "0000938836": {"name": "FMR (Fidelity)", "activism_level": "occasional"},
+    "0001350694": {"name": "T. Rowe Price", "activism_level": "occasional"},
+    "0001061165": {"name": "Baillie Gifford", "activism_level": "occasional"},
+    "0001567619": {"name": "Citadel Advisors", "activism_level": "often"},
+    "0001688453": {"name": "Two Sigma Investments", "activism_level": "often"},
+    "0001037389": {"name": "Renaissance Technologies", "activism_level": "occasional"},
+    "0000355911": {"name": "Wellington Management", "activism_level": "often"},
+    "0000868154": {"name": "LSV Asset Management", "activism_level": "occasional"},
+}
+
+# 机构投资风格简化标签（3 类：Index / Active / Broker）
+# 映射逻辑：
+#   - Index: 已知指数基金管理人，持有大量被动产品
+#   - Broker: 经纪商/做市商实体（持仓可能是客户持有而非自营）
+#   - Active: 所有其他机构（无法细分 Value/Growth/GARP 等风格）
+INSTITUTION_STYLES = {
+    "0000102909": "Index",       # Vanguard Group
+    "0001364742": "Index",       # BlackRock Fund Advisors
+    "0000093751": "Index",       # State Street (SSgA)
+    "0001423053": "Index",       # Geode Capital Management
+    "0000312769": "Active",      # JPMorgan Chase (无法细分)
+    "0000938836": "Active",      # FMR (Fidelity)
+    "0000769993": "Broker",      # Goldman Sachs & Co
+    "0001103804": "Broker",      # Morgan Stanley
+    "0001350694": "Active",      # T. Rowe Price
+    "0001061165": "Active",      # Baillie Gifford
+    "0001567619": "Active",      # Citadel Advisors
+    "0001037389": "Active",      # Renaissance Technologies
+    "0001166559": "Active",      # Dimensional Fund Advisors
+    "0000355911": "Active",      # Wellington Management
+    "0001418814": "Active",      # Invesco
+    "0000915002": "Index",       # Northern Trust
+    "0000070858": "Active",      # Bank of America
+    "0001179392": "Active",      # Nuveen Asset Management
+    "0000312435": "Active",      # Franklin Resources
+    "0000893749": "Active",      # AllianceBernstein
+    "0000868154": "Active",      # LSV Asset Management
+    "0001688453": "Active",      # Two Sigma Investments
+    "0001178453": "Index",       # Legal & General
+    "0001336528": "Active",      # Ameriprise Financial
+    "0001067983": "Active",      # Berkshire Hathaway
+}

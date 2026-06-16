@@ -301,6 +301,14 @@ def collect_all_institutional():
     except Exception as e:
         logger.error("13F signal calculation error: %s", e, exc_info=True)
 
+    # 模块 F: 交叉持股分析（13F 采集后自动刷新，复用当前连接）
+    try:
+        from cross_holding import run_cross_holding_analysis
+        logger.info("Running cross-holding analysis...")
+        run_cross_holding_analysis(existing_conn=conn)
+    except Exception as e:
+        logger.error("Cross-holding analysis error: %s", e, exc_info=True)
+
     conn.close()
     logger.info("Institutional tracking done.")
 

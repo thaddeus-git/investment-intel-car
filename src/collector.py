@@ -14,10 +14,13 @@ from datetime import datetime
 from edgar import Company, set_identity
 
 from config import (
+    ACTIVIST_INSTITUTIONS,
     COMPETITORS,
     DATABASE_PATH,
     EDGAR_IDENTITY,
+    INSTITUTION_STYLES,
     METRIC_TAGS,
+    TOP_INSTITUTIONS,
 )
 
 logger = logging.getLogger(__name__)
@@ -213,6 +216,34 @@ def init_db(conn):
             created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(company_id, report_period)
         );
+
+        -- 模块 F: 交叉持股分析
+        CREATE TABLE IF NOT EXISTS cross_holding_matrix (
+            id                  INTEGER PRIMARY KEY,
+            report_period       TEXT,
+            institution_name    TEXT,
+            institution_cik     TEXT,
+            cvna_value_x1000    REAL DEFAULT 0,
+            kmx_value_x1000     REAL DEFAULT 0,
+            an_value_x1000      REAL DEFAULT 0,
+            uxin_value_x1000    REAL DEFAULT 0,
+            athm_value_x1000    REAL DEFAULT 0,
+            total_value_x1000   REAL DEFAULT 0,
+            style_label         TEXT,
+            activism_level      TEXT,
+            turnover_proxy      TEXT,
+            created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(institution_cik, report_period)
+        );
+
+        CREATE TABLE IF NOT EXISTS institution_styles (
+            institution_cik TEXT PRIMARY KEY,
+            institution_name TEXT,
+            style_label     TEXT,
+            activism_level  TEXT,
+            source          TEXT DEFAULT 'manual',
+            updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     """)
 
     for comp in COMPETITORS:
@@ -221,6 +252,16 @@ def init_db(conn):
                 (ticker, cik, name, name_cn, sic_code)
             VALUES (?, ?, ?, ?, ?)
         """, (comp["ticker"], comp["cik"], comp["name"], comp["name_cn"], comp["sic"]))
+
+    # 模块 F: 种子机构风格数据（幂等写入）
+    for inst_cik, style_label in INSTITUTION_STYLES.items():
+        top_name = TOP_INSTITUTIONS.get(inst_cik)
+        activism = ACTIVIST_INSTITUTIONS.get(inst_cik, {}).get("activism_level")
+        conn.execute("""
+            INSERT OR REPLACE INTO institution_styles
+                (institution_cik, institution_name, style_label, activism_level)
+            VALUES (?, ?, ?, ?)
+        """, (inst_cik, top_name or inst_cik, style_label, activism))
 
     conn.commit()
     logger.info("Database initialized (10 tables + 5 companies).")
