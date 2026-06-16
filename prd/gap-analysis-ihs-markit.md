@@ -22,19 +22,19 @@
 
 IHS 报告共 11 页，结构如下：
 
-| 页码 | 内容 | 核心能力 |
-|------|------|---------|
-| 1 | 封面（分析师信息、联系方式） | — |
-| 2 | **Top Holders Positions** — 25 家机构排名，每家机构在目标公司 + 8 家同业的总持仓、分持仓，附带 Style 和 Turnover 标签 | 13F 持仓 × 同业组交叉矩阵 + 风格/换手率分类 |
-| 3 | **Top Holders Changes** — 同上但显示 QoQ 变动金额 | 13F 跨期对比 |
-| 4 | **Top 25 Activists** — 知名激进投资者持仓，标注 "Occasional" / "Often" | Activist 机构数据库 |
-| 5 | **Top Peer Buyers** — 按 QoQ 增持总额排名 Top 25 | 跨同业组汇总 Δ > 0 |
-| 6 | **Top Peer Sellers** — 按 QoQ 减持总额排名 Top 25 | 跨同业组汇总 Δ < 0 |
-| 7 | **Top Initiations & Liquidations** — 新建仓 Top 10 + 清仓 Top 10 | 跨期持仓出现/消失 |
-| 8 | **Investor Style Comparison** — 饼图 (Active/Passive 取向) + 柱状图 (按取向的资金流向) | 投资取向分类 + 资金流向归因 |
-| 9 | **Investor Style Comparison** — 饼图 (12 类风格) + 柱状图 (按风格的资金流向) | 12 类投资风格分类 + 资金流向归因 |
-| 10 | **Investor Turnover Comparison** — 饼图 (4 档 turnover) + 柱状图 (按 turnover 的资金流向) | 组合换手率计算 + 资金流向归因 |
-| 11 | **Glossary** — 术语定义 | — |
+| 页码  | 内容                                                                                    | 核心能力                        |
+| --- | ------------------------------------------------------------------------------------- | --------------------------- |
+| 1   | 封面（分析师信息、联系方式）                                                                        | —                           |
+| 2   | **Top Holders Positions** — 25 家机构排名，每家机构在目标公司 + 8 家同业的总持仓、分持仓，附带 Style 和 Turnover 标签 | 13F 持仓 × 同业组交叉矩阵 + 风格/换手率分类 |
+| 3   | **Top Holders Changes** — 同上但显示 QoQ 变动金额                                              | 13F 跨期对比                    |
+| 4   | **Top 25 Activists** — 知名激进投资者持仓，标注 "Occasional" / "Often"                            | Activist 机构数据库              |
+| 5   | **Top Peer Buyers** — 按 QoQ 增持总额排名 Top 25                                             | 跨同业组汇总 Δ > 0                |
+| 6   | **Top Peer Sellers** — 按 QoQ 减持总额排名 Top 25                                            | 跨同业组汇总 Δ < 0                |
+| 7   | **Top Initiations & Liquidations** — 新建仓 Top 10 + 清仓 Top 10                           | 跨期持仓出现/消失                   |
+| 8   | **Investor Style Comparison** — 饼图 (Active/Passive 取向) + 柱状图 (按取向的资金流向)               | 投资取向分类 + 资金流向归因             |
+| 9   | **Investor Style Comparison** — 饼图 (12 类风格) + 柱状图 (按风格的资金流向)                          | 12 类投资风格分类 + 资金流向归因         |
+| 10  | **Investor Turnover Comparison** — 饼图 (4 档 turnover) + 柱状图 (按 turnover 的资金流向)         | 组合换手率计算 + 资金流向归因            |
+| 11  | **Glossary** — 术语定义                                                                   | —                           |
 
 ---
 

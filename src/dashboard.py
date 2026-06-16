@@ -574,6 +574,8 @@ def render_cross_holding(cross_matrix_df, inst_holdings_df, inst_signal_df):
     tabs = st.tabs(tab_names)
 
     competitor_tickers = ["CVNA", "KMX", "AN", "UXIN", "ATHM"]
+    # cross_holding_matrix 表用 snake_case 列名: cvna_value_x1000 / kmx_value_x1000 / ...
+    MATRIX_VALUE_COLS = [f"{t.lower()}_value_x1000" for t in competitor_tickers]
 
     # ── Tab 1: Top Holders 热力图 + 表格 ──
     with tabs[0]:
@@ -581,7 +583,7 @@ def render_cross_holding(cross_matrix_df, inst_holdings_df, inst_signal_df):
 
         if not cross_matrix_df.empty:
             # 热力图
-            heatmap_data = cross_matrix_df[competitor_tickers].copy()
+            heatmap_data = cross_matrix_df[MATRIX_VALUE_COLS].copy()
             # 转为百万美元
             heatmap_data = heatmap_data.apply(lambda col: col / 1000)  # x1000 → M
 
@@ -608,14 +610,14 @@ def render_cross_holding(cross_matrix_df, inst_holdings_df, inst_signal_df):
             with st.expander("📋 数据表格"):
                 display_cols = (
                     ["institution_name", "style_label", "activism_level", "turnover_proxy"]
-                    + competitor_tickers
+                    + MATRIX_VALUE_COLS
                     + ["total_value_x1000"]
                 )
                 available = [c for c in display_cols if c in cross_matrix_df.columns]
                 view = cross_matrix_df[available].copy()
 
                 # 格式化
-                for tk in competitor_tickers:
+                for tk in MATRIX_VALUE_COLS:
                     if tk in view.columns:
                         view[tk] = view[tk].apply(
                             lambda x: f"${x/1000:,.1f}M" if pd.notna(x) and x > 0 else "-"
@@ -799,6 +801,91 @@ def render_cross_holding(cross_matrix_df, inst_holdings_df, inst_signal_df):
 
         5. **激进投资者标注**：仅基于静态种子名单（~8 家已知 activist），不保证覆盖所有有 activist 行为的机构。
         """)
+
+    st.divider()
+
+    # ── 资本流向归因图（IHS Markit 报告第 8-10 页简化版） ──
+    _render_capital_flows_attribution(inst_holdings_df)
+
+
+def _render_capital_flows_attribution(inst_holdings_df):
+    """📊 资本流向归因：按风格 / Turnover / Activism 分类的 QoQ 资金流向。"""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from cross_holding import compute_capital_flows_by_category
+
+    st.markdown("#### 📊 资本流向归因（按分类）")
+    st.caption("⚠️ 基于简化分类（非 IHS Markit 12 类专业分类）。数据源：QoQ 13F 持仓变动。")
+
+    # 复用 inst_holdings_df 计算（避免再开 DB 连接）
+    if inst_holdings_df.empty:
+        st.info("暂无 13F 数据。")
+        return
+
+    import sqlite3
+    conn = sqlite3.connect(DATABASE_PATH)
+    try:
+        flows = compute_capital_flows_by_category(conn)
+    except Exception as e:
+        st.warning(f"资本流向归因计算失败：{e}")
+        conn.close()
+        return
+    conn.close()
+
+    # 3 张柱状图：by_style / by_turnover / by_activism
+    col_a, col_b, col_c = st.columns(3)
+
+    def _plot_bar(df, group_col, title, ax_col):
+        if df is None or df.empty:
+            with ax_col:
+                st.info(f"{title}：暂无数据")
+            return
+        import plotly.graph_objects as go
+        # 横向柱状图，按 total_flow 排序
+        df_sorted = df.sort_values("total_flow", ascending=True)
+        fig = go.Figure(data=go.Bar(
+            x=df_sorted["total_flow"] / 1000,  # x1000 → M
+            y=df_sorted[group_col],
+            orientation="h",
+            marker_color=["#22c55e" if v > 0 else "#ef4444" for v in df_sorted["total_flow"]],
+            hovertemplate="%{y}: $%{x:,.1f}M<extra></extra>",
+        ))
+        fig.update_layout(
+            title=title,
+            height=250,
+            margin=dict(l=10, r=10, t=40, b=20),
+            xaxis=dict(title="QoQ 资金流向 ($M)", tickformat=".1f", tickprefix="$"),
+            yaxis=dict(title=""),
+            showlegend=False,
+        )
+        with ax_col:
+            st.plotly_chart(fig, use_container_width=True)
+
+    with col_a:
+        _plot_bar(flows.get("by_style"), "style_label", "按投资风格 (Style)", col_a)
+    with col_b:
+        _plot_bar(flows.get("by_turnover"), "turnover_label", "按 Turnover", col_b)
+    with col_c:
+        _plot_bar(flows.get("by_activism"), "activism", "按 Activism", col_c)
+
+    # 详细数据表
+    with st.expander("📋 归因明细表"):
+        for dim, df, label in [
+            ("by_style", flows.get("by_style"), "Style"),
+            ("by_turnover", flows.get("by_turnover"), "Turnover"),
+            ("by_activism", flows.get("by_activism"), "Activism"),
+        ]:
+            if df is None or df.empty:
+                continue
+            st.markdown(f"**{label} 归因**")
+            display = df.copy()
+            for col_name in ["CVNA", "KMX", "AN", "UXIN", "ATHM", "total_flow"]:
+                if col_name in display.columns:
+                    display[col_name] = display[col_name].apply(
+                        lambda x: f"${x/1000:+,.1f}M" if col_name == "total_flow" else f"${x/1000:+,.1f}M" if x != 0 else "-"
+                    )
+            st.dataframe(display, use_container_width=True, hide_index=True)
 
 
 # ═══════════════════════════════════════════════════════════

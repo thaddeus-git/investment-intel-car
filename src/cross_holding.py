@@ -137,6 +137,11 @@ def build_cross_holding_matrix(conn, report_period=None):
     # 计算总持仓
     matrix["total_value_x1000"] = matrix[COMPETITOR_TICKERS].sum(axis=1)
 
+    # 计算 Peer Average（同业组 5 家的算术均值，仅在该机构持有某家时计入）
+    # 注：与 IHS Markit "Peer Average" 口径不同——IHS 是在所有机构层面对每只竞品求均值，
+    # 我们是在机构层面对该机构实际持有的 5 只竞品求均值。
+    matrix["peer_avg_x1000"] = matrix[COMPETITOR_TICKERS].mean(axis=1).round(0)
+
     # 按总持仓降序排列
     matrix = matrix.sort_values("total_value_x1000", ascending=False).reset_index(drop=True)
 
@@ -154,8 +159,9 @@ def _write_matrix_to_db(conn, matrix, report_period):
                 (report_period, institution_name, institution_cik,
                  cvna_value_x1000, kmx_value_x1000, an_value_x1000,
                  uxin_value_x1000, athm_value_x1000,
-                 total_value_x1000, style_label, activism_level, turnover_proxy)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 total_value_x1000, peer_avg_x1000,
+                 style_label, activism_level, turnover_proxy)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             report_period,
             row["institution_name"],
@@ -166,6 +172,7 @@ def _write_matrix_to_db(conn, matrix, report_period):
             float(row.get("UXIN", 0)),
             float(row.get("ATHM", 0)),
             float(row["total_value_x1000"]),
+            float(row.get("peer_avg_x1000", 0)),
             row.get("style_label"),
             row.get("activism_level"),
             row.get("turnover_proxy"),
@@ -488,6 +495,92 @@ def _update_turnover_in_matrix(conn, turnover_df):
             WHERE institution_cik = ? AND report_period = ?
         """, (row["churn_label"], row["institution_cik"], period))
     conn.commit()
+
+
+# ═══════════════════════════════════════════════════════════
+# 5b. 资本流向归因（按风格 / Turnover / Activism 分类）
+# ═══════════════════════════════════════════════════════════
+
+def compute_capital_flows_by_category(conn):
+    """
+    对 QoQ 持仓变动按不同分类维度做归因聚合。
+
+    对应 IHS Markit 报告第 8-10 页的 "Capital Flows by Investor
+    Orientation/Style/Turnover" 柱状图（简化版）。
+
+    Returns:
+        dict:
+          - "by_style":   DataFrame[category, total_flow, ticker_CVNA, ...]
+          - "by_turnover": DataFrame
+          - "by_activism": DataFrame
+
+    注：⚠️ 依赖简化分类（非 IHS 等价）。
+    """
+    qoq = compute_qoq_changes(conn)
+    if qoq.empty:
+        return {"by_style": pd.DataFrame(), "by_turnover": pd.DataFrame(), "by_activism": pd.DataFrame()}
+
+    # 附加 turnover + activism 标签
+    turnover_df = compute_turnover_proxy(conn)
+    turnover_map = dict(zip(
+        turnover_df["institution_cik"],
+        turnover_df["churn_label"],
+    )) if not turnover_df.empty else {}
+
+    styles = pd.read_sql_query(
+        "SELECT institution_cik, style_label, activism_level FROM institution_styles",
+        conn,
+    )
+    activism_map = dict(zip(
+        styles["institution_cik"],
+        styles["activism_level"].fillna("none"),
+    ))
+
+    qoq["turnover_label"] = qoq["institution_cik"].map(turnover_map).fillna("Unknown")
+    qoq["activism"] = qoq["institution_cik"].map(activism_map).fillna("none")
+
+    # 1) 按 style_label 归因
+    by_style = _aggregate_flows(qoq, "style_label")
+
+    # 2) 按 turnover 归因
+    by_turnover = _aggregate_flows(qoq, "turnover_label")
+
+    # 3) 按 activism 归因
+    by_activism = _aggregate_flows(qoq, "activism")
+
+    logger.info(
+        "  Capital flows by category: %d style buckets, %d turnover buckets, %d activism buckets",
+        len(by_style), len(by_turnover), len(by_activism),
+    )
+
+    return {
+        "by_style": by_style,
+        "by_turnover": by_turnover,
+        "by_activism": by_activism,
+    }
+
+
+def _aggregate_flows(qoq_df, group_col):
+    """按指定列分组聚合 QoQ 资金流向，并按竞品展开。"""
+    agg = qoq_df.groupby(group_col).agg(
+        total_flow=("delta_value", "sum"),
+    ).reset_index()
+
+    # 按竞品展开
+    pivot = qoq_df.pivot_table(
+        index=group_col,
+        columns="ticker",
+        values="delta_value",
+        aggfunc="sum",
+        fill_value=0,
+    ).reset_index()
+
+    for tk in COMPETITOR_TICKERS:
+        if tk not in pivot.columns:
+            pivot[tk] = 0.0
+
+    result = pivot.merge(agg, on=group_col, how="left")
+    return result.sort_values("total_flow", ascending=False).reset_index(drop=True)
 
 
 # ═══════════════════════════════════════════════════════════

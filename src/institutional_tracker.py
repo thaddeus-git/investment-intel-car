@@ -93,6 +93,7 @@ def init_institutional_tables(conn):
             uxin_value_x1000    REAL DEFAULT 0,
             athm_value_x1000    REAL DEFAULT 0,
             total_value_x1000   REAL DEFAULT 0,
+            peer_avg_x1000      REAL DEFAULT 0,
             style_label         TEXT,
             activism_level      TEXT,
             turnover_proxy      TEXT,
