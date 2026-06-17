@@ -1,0 +1,6 @@
+edgartools
+openai
+pandas
+plotly
+streamlit
+schedule
