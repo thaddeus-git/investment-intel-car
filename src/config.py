@@ -1,6 +1,7 @@
 """
 竞品情报监控系统 — 配置中心
 """
+from pathlib import Path
 
 # ── edgartools identity（SEC 要求，必须设置后调 API） ──
 EDGAR_IDENTITY = "CompetitorIntel/1.0 (your-email@company.com)"
@@ -59,7 +60,8 @@ LLM_API_KEY_SUMMARY = "YOUR_KEY_HERE"   # Flash
 LLM_API_KEY_DEEP    = "YOUR_KEY_HERE"   # Pro
 
 # ── SQLite 数据库 ──
-DATABASE_PATH = "data/competitor_intel.db"
+# 用绝对路径，避免 Streamlit Cloud 等环境下 CWD 不匹配的问题
+DATABASE_PATH = str(Path(__file__).resolve().parent.parent / "data" / "competitor_intel.db")
 
 # ── XBRL 标签映射（12 个核心指标 → 公司级别的 tag 差异） ──
 # "基准标签" 是 Carvana 实测可用的概念名。
