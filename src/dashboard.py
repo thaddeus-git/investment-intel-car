@@ -227,7 +227,7 @@ def render_filing_timeline(filings_df):
     df = filings_df[filings_df["ticker"].isin(selected)].head(15)
 
     for _, row in df.iterrows():
-        items = row["items"] or ""
+        items = row["items"] if isinstance(row["items"], str) else ""
         form = row["form_type"]
         date = str(row["filing_date"])[:10]
         emoji = "📊" if form in ("10-Q", "10-K", "20-F") else "⚠️" if form in ("8-K", "6-K") else "📋"
