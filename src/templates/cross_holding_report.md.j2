@@ -1,0 +1,172 @@
+{# cross_holding_report.md.j2 — IHS Markit 格式交叉持股报告模板 #}
+# 竞品交叉持股分析报告
+
+> 报告期: **{{ report_period }}**  |  生成时间: {{ generated_at }}
+> 覆盖机构: **{{ total_institutions }}** 家  |  同业组: CVNA / KMX / AN / UXIN / ATHM
+
+---
+
+## 1. Top Holders Positions
+
+| # | 机构 | 风格 | Turnover | 总持仓 ($M) | Change ($M) | Peer Avg ($M) | CVNA ($M) | KMX ($M) | AN ($M) | UXIN ($M) | ATHM ($M) |
+|---|------|------|----------|------------|-------------|---------------|-----------|----------|---------|-----------|-----------|
+{% for r in top_holders %}
+| {{ r.rank }} | {{ r.name }} | {{ r.style }} | {{ r.turnover }} | {{ r.total }} | {{ r.change }} | {{ r.peer_avg }} | {{ r.CVNA }} | {{ r.KMX }} | {{ r.AN }} | {{ r.UXIN }} | {{ r.ATHM }} |
+{% endfor %}
+
+<!-- Commentary: -->
+
+---
+
+## 2. Top Holders Changes
+
+{% if qoq_changes %}
+| # | 机构 | 竞品 | 当前 ($M) | 上期 ($M) | Δ ($M) | Δ% | 风格 |
+|---|------|------|----------|----------|-------|----|------|
+{% for r in qoq_changes %}
+| {{ r.rank }} | {{ r.name }} | {{ r.ticker }} | {{ r.current }} | {{ r.previous }} | {{ r.delta }} | {{ r.delta_pct }} | {{ r.style }} |
+{% endfor %}
+{% else %}
+暂无 QoQ 对比数据（需要至少两期 13F）。
+{% endif %}
+
+<!-- Commentary: -->
+
+---
+
+## 3. Top Activists
+
+{% if activists %}
+| # | 机构 | Activism | 总持仓 ($M) | CVNA ($M) | KMX ($M) | AN ($M) | UXIN ($M) | ATHM ($M) |
+|---|------|----------|------------|-----------|----------|---------|-----------|-----------|
+{% for r in activists %}
+| {{ r.rank }} | {{ r.name }} | {{ r.activism }} | {{ r.total }} | {{ r.CVNA }} | {{ r.KMX }} | {{ r.AN }} | {{ r.UXIN }} | {{ r.ATHM }} |
+{% endfor %}
+{% else %}
+暂无 activist 机构持仓记录。
+{% endif %}
+
+<!-- Commentary: -->
+
+---
+
+## 4. Top Peer Buyers（增持排名）
+
+{% if buyers %}
+| # | 机构 | 风格 | Turnover | 总增持 ($M) | CVNA ($M) | KMX ($M) | AN ($M) | UXIN ($M) | ATHM ($M) |
+|---|------|------|----------|------------|-----------|----------|---------|-----------|-----------|
+{% for r in buyers %}
+| {{ r.rank }} | {{ r.name }} | {{ r.style }} | {{ r.turnover }} | {{ r.total }} | {{ r.CVNA }} | {{ r.KMX }} | {{ r.AN }} | {{ r.UXIN }} | {{ r.ATHM }} |
+{% endfor %}
+{% else %}
+暂无 QoQ 对比数据（需要至少两期 13F）。
+{% endif %}
+
+<!-- Commentary: -->
+
+---
+
+## 5. Top Peer Sellers（减持排名）
+
+{% if sellers %}
+| # | 机构 | 风格 | Turnover | 总减持 ($M) | CVNA ($M) | KMX ($M) | AN ($M) | UXIN ($M) | ATHM ($M) |
+|---|------|------|----------|------------|-----------|----------|---------|-----------|-----------|
+{% for r in sellers %}
+| {{ r.rank }} | {{ r.name }} | {{ r.style }} | {{ r.turnover }} | {{ r.total }} | {{ r.CVNA }} | {{ r.KMX }} | {{ r.AN }} | {{ r.UXIN }} | {{ r.ATHM }} |
+{% endfor %}
+{% else %}
+暂无 QoQ 对比数据（需要至少两期 13F）。
+{% endif %}
+
+<!-- Commentary: -->
+
+---
+
+## 6. Top Initiations（新建仓）
+
+{% if initiations %}
+| # | 机构 | 竞品 | 市值 ($M) | 风格 | Turnover |
+|---|------|------|----------|------|----------|
+{% for r in initiations %}
+| {{ r.rank }} | {{ r.name }} | {{ r.ticker }} | {{ r.value }} | {{ r.style }} | {{ r.turnover }} |
+{% endfor %}
+{% else %}
+暂无新建仓记录。
+{% endif %}
+
+<!-- Commentary: -->
+
+## 7. Top Liquidations（清仓）
+
+{% if liquidations %}
+| # | 机构 | 竞品 | 上期市值 ($M) | 风格 | Turnover |
+|---|------|------|-------------|------|----------|
+{% for r in liquidations %}
+| {{ r.rank }} | {{ r.name }} | {{ r.ticker }} | {{ r.value }} | {{ r.style }} | {{ r.turnover }} |
+{% endfor %}
+{% else %}
+暂无清仓记录。
+{% endif %}
+
+<!-- Commentary: -->
+
+---
+
+## 8. Investor Style Comparison
+
+{% if orientation %}
+### Investor Orientation Breakdown
+
+| Orientation | 机构数 | 占比 |
+|-------------|--------|------|
+{% for r in orientation %}
+| {{ r.label }} | {{ r.count }} | {{ r.pct }}% |
+{% endfor %}
+{% endif %}
+
+{% if turnover %}
+### Investor Turnover Breakdown
+
+| Turnover | 机构数 | 占比 |
+|----------|--------|------|
+{% for r in turnover %}
+| {{ r.label }} | {{ r.count }} | {{ r.pct }}% |
+{% endfor %}
+{% endif %}
+
+<!-- Commentary: -->
+
+---
+
+## 9. 持仓变动率估算 (Turnover Proxy)
+
+{% if turnover_list %}
+| 机构 | Churn Proxy | 分档 | 风格 |
+|------|------------|------|------|
+{% for r in turnover_list %}
+| {{ r.name }} | {{ r.churn }} | {{ r.label }} | {{ r.style }} |
+{% endfor %}
+{% endif %}
+
+<!-- Commentary: -->
+
+---
+
+## ⚠️ 免责声明与差距说明
+
+1. **机构覆盖范围**：本报告仅覆盖 {{ total_institutions }} 家种子机构（13F 申报人），
+   不代表完整机构持有人全景。IHS Markit 报告覆盖全市场 ~5,000 家 13F 申报人。
+
+2. **投资风格标签**：本报告中的风格标签（Index / Active / Broker）为基于实体类型的简化分类，
+   **非 IHS Markit 专业风格标签**（Value / Growth / GARP / Aggressive Growth 等 12 类）。
+   详细差距说明见 `/Users/liuming/sec/prd/reference/gap-analysis-ihs-markit.md`。
+
+3. **Turnover Proxy**：基于 QoQ 13F 快照的持仓变动率估算，非精确 portfolio turnover。
+   IHS Markit 基于 12 个月日度交易数据计算 4 档分类（Low / Medium / High / Very Active）。
+   **本报告为 3 档简化分类（Low / Medium / High）。**
+
+4. **数据时滞**：13F 数据滞后约 45 天（季末后 45 天申报截止）。
+   本报告反映的是 **{{ report_period }}** 季末的机构持仓情况，非实时持仓。
+
+5. **激进投资者标注**：仅基于静态种子名单（{{ activist_count }} 家已知 activist），
+   不保证覆盖所有有 activist 行为的机构。

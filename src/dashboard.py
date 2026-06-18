@@ -572,8 +572,37 @@ def render_insider_institutional(insider_sent_df, insider_txns_df, form144_df,
 # Block 7: 交叉持股全景（模块 F）
 # ═══════════════════════════════════════════════════════════
 
-def render_cross_holding(cross_matrix_df, inst_holdings_df, inst_signal_df):
-    """📊 交叉持股全景 — 以 IHS Markit Cross Ownership Report 为模板。"""
+@st.cache_data(ttl=300)  # 5 分钟缓存，与 load_data() 对齐
+def _load_cross_holding_derived():
+    """缓存：调用 cross_holding 模块函数获取 QoQ / Buyers / Sellers / Init / Liq / Turnover 数据。
+
+    ⚠️ BUG-9 fix: 复用 cross_holding 模块逻辑，不再在 Dashboard 中独立实现 QoQ。
+    """
+    import sqlite3 as _sqlite3
+    conn = _sqlite3.connect(DATABASE_PATH)
+    try:
+        from cross_holding import (
+            compute_qoq_changes,
+            find_initiations_liquidations,
+            compute_turnover_proxy,
+            rank_top_buyers_sellers,
+        )
+        qoq = compute_qoq_changes(conn)
+        buyers = rank_top_buyers_sellers(conn, "buyers", top_n=25)
+        sellers = rank_top_buyers_sellers(conn, "sellers", top_n=25)
+        init_df, liq_df = find_initiations_liquidations(conn)
+        turnover = compute_turnover_proxy(conn)
+        return qoq, buyers, sellers, init_df, liq_df, turnover
+    finally:
+        conn.close()
+
+
+def render_cross_holding(cross_matrix_df, inst_signal_df):
+    """📊 交叉持股全景 — 以 IHS Markit Cross Ownership Report 为模板。
+
+    ⚠️ QoQ / Buyers / Sellers / Init / Liq 数据由 cross_holding 模块函数提供，
+    Dashboard 不再重复实现数据计算逻辑（BUG-9 修复）。
+    """
     st.subheader("📊 交叉持股全景 (13F)")
 
     if cross_matrix_df.empty:
@@ -611,7 +640,7 @@ def render_cross_holding(cross_matrix_df, inst_holdings_df, inst_signal_df):
 
     st.divider()
 
-    # ── Tabs 切换（新增 Activists + Charts） ──
+    # ── Tabs 切换 ──
     tab_names = [
         "📋 Top Holders",
         "📈 QoQ 变动",
@@ -630,42 +659,16 @@ def render_cross_holding(cross_matrix_df, inst_holdings_df, inst_signal_df):
     turnover_lookup = {}
     if "turnover_proxy" in cross_matrix_df.columns and "institution_cik" in cross_matrix_df.columns:
         turnover_lookup = dict(zip(cross_matrix_df["institution_cik"], cross_matrix_df["turnover_proxy"]))
+    style_map = dict(zip(cross_matrix_df["institution_cik"], cross_matrix_df["style_label"])) if "style_label" in cross_matrix_df.columns and "institution_cik" in cross_matrix_df.columns else {}
 
-    # ── 计算 QoQ 变动 ──
-    qoq_data = None
-    qoq_merged = None
-    if not inst_holdings_df.empty:
-        periods = sorted(inst_holdings_df["report_period"].dropna().unique(), reverse=True)
-        if len(periods) >= 2:
-            curr_p, prev_p = periods[0], periods[1]
-            curr_agg = inst_holdings_df[inst_holdings_df["report_period"] == curr_p].groupby(
-                ["institution_cik", "institution_name", "ticker"]
-            )["value_x1000"].sum().reset_index()
-            prev_agg = inst_holdings_df[inst_holdings_df["report_period"] == prev_p].groupby(
-                ["institution_cik", "ticker"]
-            )["value_x1000"].sum().reset_index()
-            prev_agg.rename(columns={"value_x1000": "prev_value_x1000"}, inplace=True)
+    # ── 从 cross_holding 模块获取派生数据（替代原有的 inline QoQ 计算） ──
+    qoq_df, buyers_df, sellers_df, init_df, liq_df, turnover_df = _load_cross_holding_derived()
 
-            qoq_merged = curr_agg.merge(prev_agg, on=["institution_cik", "ticker"], how="outer")
-            qoq_merged["curr_value"] = qoq_merged["value_x1000"].fillna(0)
-            qoq_merged["prev_value"] = qoq_merged["prev_value_x1000"].fillna(0)
-            qoq_merged["delta"] = qoq_merged["curr_value"] - qoq_merged["prev_value"]
-            # 补全 institution_name：outer join 时，仅存在于上期的机构名可能为 NaN
-            if "institution_name" not in qoq_merged.columns:
-                qoq_merged["institution_name"] = qoq_merged["institution_cik"]
-            # 对 NaN 的 institution_name，从 inst_holdings_df 反查
-            null_name_mask = qoq_merged["institution_name"].isna()
-            if null_name_mask.any():
-                name_lookup = inst_holdings_df.dropna(subset=["institution_name"]).drop_duplicates(subset=["institution_cik"]).set_index("institution_cik")["institution_name"].to_dict()
-                qoq_merged.loc[null_name_mask, "institution_name"] = qoq_merged.loc[null_name_mask, "institution_cik"].map(name_lookup)
-                # 兜底：仍为 NaN 的用 CIK 替代
-                qoq_merged["institution_name"] = qoq_merged["institution_name"].fillna(qoq_merged["institution_cik"])
+    # 获取两个最近报告期（用于 Tab 2 的 caption）
+    qoq_periods = sorted(cross_matrix_df["report_period"].dropna().unique(), reverse=True)[:2] if "report_period" in cross_matrix_df.columns else []
+    qoq_has_data = not qoq_df.empty
 
-            qoq_data = qoq_merged[qoq_merged["delta"].abs() > 0].sort_values(
-                "delta", key=abs, ascending=False
-            )
-
-    # ── Tab 1: Top Holders 热力图 + 表格（增强：含 Change / Peer Avg / Style / Turnover） ──
+    # ── Tab 1: Top Holders 热力图 + 表格 ──
     with tabs[0]:
         st.markdown("#### 机构 × 竞品 持仓矩阵")
 
@@ -692,13 +695,10 @@ def render_cross_holding(cross_matrix_df, inst_holdings_df, inst_signal_df):
             )
             st.plotly_chart(fig, width='stretch')
 
-            # 增强表格：含 Change / Peer Avg / Style / Turnover
+            # 增强表格
             with st.expander("📋 数据表格"):
-                display = cross_matrix_df.copy()
-
-                # 格式化各列
                 table_rows = []
-                for idx, (_, row) in enumerate(display.iterrows()):
+                for idx, (_, row) in enumerate(cross_matrix_df.iterrows()):
                     r = {}
                     r["#"] = idx + 1
                     r["机构"] = row.get("institution_name", "-")
@@ -721,18 +721,18 @@ def render_cross_holding(cross_matrix_df, inst_holdings_df, inst_signal_df):
 
             st.caption("<!-- Commentary -->")
 
-    # ── Tab 2: QoQ 变动（增强：含 Style / Turnover） ──
+    # ── Tab 2: QoQ 变动（数据来自 cross_holding.compute_qoq_changes） ──
     with tabs[1]:
         st.markdown("#### QoQ 持仓变动")
-        if qoq_data is None or qoq_data.empty:
+        if not qoq_has_data:
             st.info("需要至少两期 13F 数据才能显示 QoQ 变动。")
         else:
-            st.caption(f"对比期: {periods[1]} → {periods[0]}")
-            display = qoq_data.head(30).copy()
-            display["Δ ($M)"] = display["delta"].apply(lambda x: f"${x/1000:+,.1f}M" if x != 0 else "-")
-            display["当前 ($M)"] = display["curr_value"].apply(lambda x: f"${x/1000:,.1f}M" if pd.notna(x) and x > 0 else "-")
-            display["上期 ($M)"] = display["prev_value"].apply(lambda x: f"${x/1000:,.1f}M" if pd.notna(x) and x > 0 else "-")
-            style_map = dict(zip(cross_matrix_df["institution_cik"], cross_matrix_df["style_label"])) if "style_label" in cross_matrix_df.columns and "institution_cik" in cross_matrix_df.columns else {}
+            if len(qoq_periods) >= 2:
+                st.caption(f"对比期: {qoq_periods[1]} → {qoq_periods[0]}")
+            display = qoq_df.head(30).copy()
+            display["Δ ($M)"] = display["delta_value"].apply(lambda x: f"${x/1000:+,.1f}M" if x != 0 else "-")
+            display["当前 ($M)"] = display["current_value"].apply(lambda x: f"${x/1000:,.1f}M" if pd.notna(x) and x > 0 else "-")
+            display["上期 ($M)"] = display["previous_value"].apply(lambda x: f"${x/1000:,.1f}M" if pd.notna(x) and x > 0 else "-")
             display["风格"] = display["institution_cik"].map(style_map).fillna("-")
             display["Turnover"] = display["institution_cik"].map(turnover_lookup).fillna("-")
             st.dataframe(
@@ -743,7 +743,7 @@ def render_cross_holding(cross_matrix_df, inst_holdings_df, inst_signal_df):
             )
             st.caption("<!-- Commentary -->")
 
-    # ── Tab 3: Activists（IHS P4） ──
+    # ── Tab 3: Activists ──
     with tabs[2]:
         st.markdown("#### ⚔️ Top Activists 持仓")
         if not cross_matrix_df.empty and "activism_level" in cross_matrix_df.columns:
@@ -756,7 +756,6 @@ def render_cross_holding(cross_matrix_df, inst_holdings_df, inst_signal_df):
                 activists_df = activists_df.sort_values("total_value_x1000", ascending=False)
                 activists_df.insert(0, "Rank", range(1, len(activists_df) + 1))
                 display = activists_df[["Rank", "institution_name", "activism_level", "style_label", "turnover_proxy", "total_value_x1000", "peer_avg_x1000"] + MATRIX_VALUE_COLS].copy()
-                # 格式化
                 for col_name in MATRIX_VALUE_COLS + ["total_value_x1000", "peer_avg_x1000"]:
                     if col_name in display.columns:
                         display[col_name] = display[col_name].apply(
@@ -774,147 +773,110 @@ def render_cross_holding(cross_matrix_df, inst_holdings_df, inst_signal_df):
         else:
             st.info("暂无 activist 数据。")
 
-    # ── Tab 4: Top Buyers（增强：含 Style / Turnover） ──
+    # ── Tab 4: Top Buyers（数据来自 cross_holding.rank_top_buyers_sellers） ──
     with tabs[3]:
         st.markdown("#### Top Peer Buyers（增持排名）")
-        if qoq_data is None or qoq_data.empty:
+        if buyers_df.empty:
             st.info("需要至少两期 13F 数据。")
         else:
-            buyers = qoq_data[qoq_data["delta"] > 0].groupby(
-                ["institution_cik", "institution_name"]
-            )["delta"].sum().reset_index().sort_values("delta", ascending=False).head(25)
-
-            buyers_detail = qoq_data[qoq_data["institution_cik"].isin(buyers["institution_cik"])]
-            buyers_pivot = buyers_detail.pivot_table(
-                index=["institution_cik", "institution_name"],
-                columns="ticker", values="delta", fill_value=0
-            ).reset_index()
-
-            buyers_out = buyers.merge(buyers_pivot, on=["institution_cik", "institution_name"], how="left")
+            # rank_top_buyers_sellers 返回 {ticker}_change 列，需先选取再转换
+            change_cols = [f"{tk}_change" for tk in competitor_tickers]
+            available_change_cols = [c for c in change_cols if c in buyers_df.columns]
+            display = buyers_df[["rank", "institution_name", "style_label", "total_change"] + available_change_cols].copy()
+            # 格式化 — 总增持
+            display["总增持"] = display["total_change"].apply(lambda x: f"${x/1000:,.1f}M")
+            # 各竞品列：从 {tk}_change 转换为 {tk} 展示列
             for tk in competitor_tickers:
-                if tk not in buyers_out.columns:
-                    buyers_out[tk] = 0.0
-
-            # 附加 style_label 和 turnover
-            style_map = dict(zip(cross_matrix_df["institution_cik"], cross_matrix_df["style_label"])) if "style_label" in cross_matrix_df.columns and "institution_cik" in cross_matrix_df.columns else {}
-            buyers_out["风格"] = buyers_out["institution_cik"].map(style_map).fillna("-")
-            buyers_out["Turnover"] = buyers_out["institution_cik"].map(turnover_lookup).fillna("-")
-
-            buyers_out.insert(0, "Rank", range(1, len(buyers_out) + 1))
-
-            display = buyers_out[["Rank", "institution_name", "风格", "Turnover", "delta"] + competitor_tickers].copy()
-            for tk in competitor_tickers:
-                display[tk] = display[tk].apply(lambda x: f"${x/1000:+,.1f}M" if x != 0 else "-")
-            display["delta"] = display["delta"].apply(lambda x: f"${x/1000:,.1f}M")
+                tk_col = f"{tk}_change"
+                if tk_col in display.columns:
+                    display[tk] = display[tk_col].apply(lambda x: f"${x/1000:+,.1f}M" if x != 0 else "-")
+                else:
+                    display[tk] = "-"
+            # 附加 Turnover
+            cik_col = buyers_df["institution_cik"] if "institution_cik" in buyers_df.columns else None
+            if cik_col is not None:
+                display["Turnover"] = cik_col.map(turnover_lookup).fillna("-")
+            else:
+                display["Turnover"] = "-"
 
             st.dataframe(
-                display.rename(columns={"institution_name": "机构", "delta": "总增持"}),
+                display[["rank", "institution_name", "style_label", "Turnover", "总增持"] + competitor_tickers].rename(
+                    columns={"rank": "#", "institution_name": "机构", "style_label": "风格"}
+                ),
                 width='stretch', hide_index=True,
             )
             st.caption("<!-- Commentary -->")
 
-    # ── Tab 5: Top Sellers（增强：含 Style / Turnover） ──
+    # ── Tab 5: Top Sellers（数据来自 cross_holding.rank_top_buyers_sellers） ──
     with tabs[4]:
         st.markdown("#### Top Peer Sellers（减持排名）")
-        if qoq_data is None or qoq_data.empty:
+        if sellers_df.empty:
             st.info("需要至少两期 13F 数据。")
         else:
-            sellers = qoq_data[qoq_data["delta"] < 0].groupby(
-                ["institution_cik", "institution_name"]
-            )["delta"].sum().reset_index().sort_values("delta", ascending=True).head(25)
-
-            sellers_detail = qoq_data[qoq_data["institution_cik"].isin(sellers["institution_cik"])]
-            sellers_pivot = sellers_detail.pivot_table(
-                index=["institution_cik", "institution_name"],
-                columns="ticker", values="delta", fill_value=0
-            ).reset_index()
-
-            sellers_out = sellers.merge(sellers_pivot, on=["institution_cik", "institution_name"], how="left")
+            # rank_top_buyers_sellers 返回 {ticker}_change 列，需先选取再转换
+            change_cols = [f"{tk}_change" for tk in competitor_tickers]
+            available_change_cols = [c for c in change_cols if c in sellers_df.columns]
+            display = sellers_df[["rank", "institution_name", "style_label", "total_change"] + available_change_cols].copy()
+            # 总减持（sellers 的 total_change 已 abs 化）
+            display["总减持"] = display["total_change"].apply(lambda x: f"${x/1000:,.1f}M")
             for tk in competitor_tickers:
-                if tk not in sellers_out.columns:
-                    sellers_out[tk] = 0.0
-
-            style_map = dict(zip(cross_matrix_df["institution_cik"], cross_matrix_df["style_label"])) if "style_label" in cross_matrix_df.columns and "institution_cik" in cross_matrix_df.columns else {}
-            sellers_out["风格"] = sellers_out["institution_cik"].map(style_map).fillna("-")
-            sellers_out["Turnover"] = sellers_out["institution_cik"].map(turnover_lookup).fillna("-")
-
-            sellers_out.insert(0, "Rank", range(1, len(sellers_out) + 1))
-
-            display = sellers_out[["Rank", "institution_name", "风格", "Turnover", "delta"] + competitor_tickers].copy()
-            for tk in competitor_tickers:
-                display[tk] = display[tk].apply(lambda x: f"${x/1000:+,.1f}M" if x != 0 else "-")
-            display["delta"] = display["delta"].apply(lambda x: f"${abs(x)/1000:,.1f}M")
+                tk_col = f"{tk}_change"
+                if tk_col in display.columns:
+                    display[tk] = display[tk_col].apply(lambda x: f"${abs(x)/1000:,.1f}M" if x != 0 else "-")
+                else:
+                    display[tk] = "-"
+            cik_col = sellers_df["institution_cik"] if "institution_cik" in sellers_df.columns else None
+            if cik_col is not None:
+                display["Turnover"] = cik_col.map(turnover_lookup).fillna("-")
+            else:
+                display["Turnover"] = "-"
 
             st.dataframe(
-                display.rename(columns={"institution_name": "机构", "delta": "总减持"}),
+                display[["rank", "institution_name", "style_label", "Turnover", "总减持"] + competitor_tickers].rename(
+                    columns={"rank": "#", "institution_name": "机构", "style_label": "风格"}
+                ),
                 width='stretch', hide_index=True,
             )
             st.caption("<!-- Commentary -->")
 
-    # ── Tab 6: Initiations & Liquidations（增强：含 Style / Turnover） ──
+    # ── Tab 6: Initiations & Liquidations（数据来自 cross_holding.find_initiations_liquidations） ──
     with tabs[5]:
         col_init, col_liq = st.columns(2)
 
-        # Style lookup shared by both init and liq blocks
-        style_map_init = dict(zip(cross_matrix_df["institution_cik"], cross_matrix_df["style_label"])) if "style_label" in cross_matrix_df.columns and "institution_cik" in cross_matrix_df.columns else {}
-
         with col_init:
             st.markdown("##### 🆕 新建仓 (Initiations)")
-            if qoq_data is None or qoq_data.empty:
-                st.info("需要至少两期数据。")
+            if init_df.empty:
+                st.info("无新建仓记录。")
             else:
-                # BUG-9 fix: aligned with cross_holding.py logic — prev missing/zero + curr > 0
-                inits = qoq_merged[
-                    (qoq_merged["prev_value_x1000"].isna() | (qoq_merged["prev_value_x1000"] == 0))
-                    & (qoq_merged["value_x1000"] > 0)
-                ]
-                # Exclude prev-only institutions (no current holdings)
-                inits = inits[inits["value_x1000"].notna() & (inits["value_x1000"] > 0)]
-                inits = inits.sort_values("value_x1000", ascending=False).head(10)
-                if inits.empty:
-                    st.info("无新建仓记录。")
-                else:
-                    inits["Turnover"] = inits["institution_cik"].map(turnover_lookup).fillna("-")
-                    inits["风格"] = inits["institution_cik"].map(style_map_init).fillna("-")
-                    display = inits[["institution_name", "ticker", "value_x1000", "风格", "Turnover"]].copy()
-                    display["市值"] = display["value_x1000"].apply(lambda x: f"${x/1000:,.1f}M")
-                    st.dataframe(
-                        display[["institution_name", "ticker", "市值", "风格", "Turnover"]].rename(
-                            columns={"institution_name": "机构", "ticker": "竞品"}
-                        ),
-                        width='stretch', hide_index=True,
-                    )
+                init_display = init_df.head(10).copy()
+                init_display["市值"] = init_display["current_value"].apply(lambda x: f"${x/1000:,.1f}M")
+                init_display["Turnover"] = init_display["institution_cik"].map(turnover_lookup).fillna("-")
+                st.dataframe(
+                    init_display[["institution_name", "ticker", "市值", "style_label", "Turnover"]].rename(
+                        columns={"institution_name": "机构", "ticker": "竞品", "style_label": "风格"}
+                    ),
+                    width='stretch', hide_index=True,
+                )
 
         with col_liq:
             st.markdown("##### 💀 清仓 (Liquidations)")
-            if qoq_data is None or qoq_data.empty:
-                st.info("需要至少两期数据。")
+            if liq_df.empty:
+                st.info("无清仓记录。")
             else:
-                # BUG-9 fix: aligned — curr missing/zero + prev > 0
-                liqs = qoq_merged[
-                    (qoq_merged["value_x1000"].isna() | (qoq_merged["value_x1000"] == 0))
-                    & (qoq_merged["prev_value_x1000"] > 0)
-                ]
-                liqs = liqs.sort_values("prev_value_x1000", ascending=False).head(10)
-                if liqs.empty:
-                    st.info("无清仓记录。")
-                else:
-                    liqs["Turnover"] = liqs["institution_cik"].map(turnover_lookup).fillna("-")
-                    liqs["风格"] = liqs["institution_cik"].map(style_map_init).fillna("-")
-                    display = liqs[["institution_name", "ticker", "prev_value_x1000", "风格", "Turnover"]].copy()
-                    display["上期市值"] = display["prev_value_x1000"].apply(lambda x: f"${x/1000:,.1f}M")
-                    st.dataframe(
-                        display[["institution_name", "ticker", "上期市值", "风格", "Turnover"]].rename(
-                            columns={"institution_name": "机构", "ticker": "竞品"}
-                        ),
-                        width='stretch', hide_index=True,
-                    )
+                liq_display = liq_df.head(10).copy()
+                liq_display["上期市值"] = liq_display["previous_value"].apply(lambda x: f"${x/1000:,.1f}M")
+                liq_display["Turnover"] = liq_display["institution_cik"].map(turnover_lookup).fillna("-")
+                st.dataframe(
+                    liq_display[["institution_name", "ticker", "上期市值", "style_label", "Turnover"]].rename(
+                        columns={"institution_name": "机构", "ticker": "竞品", "style_label": "风格"}
+                    ),
+                    width='stretch', hide_index=True,
+                )
 
         st.caption("<!-- Commentary -->")
 
-    # ── Tab 7: Charts（IHS P8-P10 简化：饼图 + 柱状图） ──
+    # ── Tab 7: Charts（本身已调用 cross_holding.compute_capital_flows_by_category） ──
     with tabs[6]:
-        # BUG-15: compute flows once, share with both chart renderers
         flows = _compute_flows_once()
         _render_pie_charts(cross_matrix_df, flows)
         _render_capital_flows_attribution(flows)
@@ -1216,7 +1178,7 @@ def main():
     st.divider()
 
     # Block 7: 交叉持股全景（模块 F）
-    render_cross_holding(cross_matrix, inst_holdings, inst_signal)
+    render_cross_holding(cross_matrix, inst_signal)
 
 
 if __name__ == "__main__":

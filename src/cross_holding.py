@@ -11,14 +11,16 @@
 5. compute_turnover_proxy()        — 持仓换手率近似估算
 6. generate_cross_holding_report() — Markdown 格式报告
 
-与 IHS Markit 差距说明见 /Users/liuming/sec/prd/gap-analysis-ihs-markit.md
+与 IHS Markit 差距说明见 /Users/liuming/sec/prd/reference/gap-analysis-ihs-markit.md
 """
 
 import logging
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
+from jinja2 import Environment, FileSystemLoader
 
 from config import (
     COMPETITORS,
@@ -137,10 +139,42 @@ def build_cross_holding_matrix(conn, report_period=None):
     # 计算总持仓
     matrix["total_value_x1000"] = matrix[COMPETITOR_TICKERS].sum(axis=1)
 
-    # 计算 Peer Average（同业组 5 家的算术均值，仅在该机构持有某家时计入）
+    # 计算 Peer Average（同业组 5 家的算术均值）
     # 注：与 IHS Markit "Peer Average" 口径不同——IHS 是在所有机构层面对每只竞品求均值，
     # 我们是在机构层面对该机构实际持有的 5 只竞品求均值。
     matrix["peer_avg_x1000"] = matrix[COMPETITOR_TICKERS].mean(axis=1).round(0)
+
+    # 计算 QoQ Change（上期 vs 本期总持仓变动），用于在 P2 表格中同步展示
+    total_change_map = {}
+    periods = conn.execute("""
+        SELECT DISTINCT report_period FROM institutional_holdings
+        WHERE report_period != ''
+        ORDER BY report_period DESC LIMIT 2
+    """).fetchall()
+    if len(periods) >= 2:
+        curr_p, prev_p = periods[0][0], periods[1][0]
+        curr_totals = pd.read_sql_query("""
+            SELECT institution_cik, SUM(value_x1000) AS total_curr
+            FROM institutional_holdings WHERE report_period = ?
+            GROUP BY institution_cik
+        """, conn, params=(curr_p,))
+        prev_totals = pd.read_sql_query("""
+            SELECT institution_cik, SUM(value_x1000) AS total_prev
+            FROM institutional_holdings WHERE report_period = ?
+            GROUP BY institution_cik
+        """, conn, params=(prev_p,))
+        change_df = curr_totals.merge(prev_totals, on="institution_cik", how="outer")
+        # BUG-1/B2 fix: compute real change, handling new and exited institutions
+        change_df["total_change_x1000"] = change_df.apply(
+            lambda r: (r["total_curr"] if pd.notna(r["total_curr"]) else 0)
+                    - (r["total_prev"] if pd.notna(r["total_prev"]) else 0),
+            axis=1,
+        )
+        total_change_map = {r["institution_cik"]: r["total_change_x1000"]
+                           for _, r in change_df.iterrows()
+                           if pd.notna(r["total_change_x1000"])}
+
+    matrix["total_change_x1000"] = matrix["institution_cik"].map(total_change_map).fillna(0)
 
     # 按总持仓降序排列
     matrix = matrix.sort_values("total_value_x1000", ascending=False).reset_index(drop=True)
@@ -153,15 +187,41 @@ def build_cross_holding_matrix(conn, report_period=None):
 
 def _write_matrix_to_db(conn, matrix, report_period):
     """将交叉持股矩阵写入 cross_holding_matrix 表。"""
+    # 幂等建表（允许单独运行 cross_holding.py 而不依赖 institutional_tracker.py）
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS cross_holding_matrix (
+            id                  INTEGER PRIMARY KEY,
+            report_period       TEXT,
+            institution_name    TEXT,
+            institution_cik     TEXT,
+            cvna_value_x1000    REAL DEFAULT 0,
+            kmx_value_x1000     REAL DEFAULT 0,
+            an_value_x1000      REAL DEFAULT 0,
+            uxin_value_x1000    REAL DEFAULT 0,
+            athm_value_x1000    REAL DEFAULT 0,
+            total_value_x1000   REAL DEFAULT 0,
+            total_change_x1000  REAL DEFAULT 0,
+            peer_avg_x1000      REAL DEFAULT 0,
+            style_label         TEXT,
+            activism_level      TEXT,
+            turnover_proxy      TEXT,
+            created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(institution_cik, report_period)
+        );
+    """)
+    import math
     for _, row in matrix.iterrows():
+        change_val = row.get("total_change_x1000")
+        if change_val is None or (isinstance(change_val, float) and math.isnan(change_val)):
+            change_val = None
         conn.execute("""
             INSERT OR REPLACE INTO cross_holding_matrix
                 (report_period, institution_name, institution_cik,
                  cvna_value_x1000, kmx_value_x1000, an_value_x1000,
                  uxin_value_x1000, athm_value_x1000,
-                 total_value_x1000, peer_avg_x1000,
+                 total_value_x1000, total_change_x1000, peer_avg_x1000,
                  style_label, activism_level, turnover_proxy)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             report_period,
             row["institution_name"],
@@ -172,6 +232,7 @@ def _write_matrix_to_db(conn, matrix, report_period):
             float(row.get("UXIN", 0)),
             float(row.get("ATHM", 0)),
             float(row["total_value_x1000"]),
+            change_val,
             float(row.get("peer_avg_x1000", 0)),
             row.get("style_label"),
             row.get("activism_level"),
@@ -215,7 +276,7 @@ def compute_qoq_changes(conn):
                SUM(value_x1000) AS value_x1000
         FROM institutional_holdings
         WHERE report_period = ?
-        GROUP BY institution_cik, ticker
+        GROUP BY institution_cik, ticker, institution_name
     """, conn, params=(current_period,))
 
     prev_df = pd.read_sql_query("""
@@ -223,7 +284,7 @@ def compute_qoq_changes(conn):
                SUM(value_x1000) AS value_x1000
         FROM institutional_holdings
         WHERE report_period = ?
-        GROUP BY institution_cik, ticker
+        GROUP BY institution_cik, ticker, institution_name
     """, conn, params=(previous_period,))
 
     # Merge 两期
@@ -239,6 +300,13 @@ def compute_qoq_changes(conn):
     merged["institution_name"] = (
         merged["institution_name_curr"].fillna(merged["institution_name_prev"])
     )
+
+    # BUG-4 fix: only filter out rows where BOTH periods have no data (pure noise)
+    # Keep prev-only institutions (fully exited → valid sell) and curr-only (new → valid buy)
+    merged = merged[~(
+        (merged["value_x1000_curr"].isna() | (merged["value_x1000_curr"] == 0)) &
+        (merged["value_x1000_prev"].isna() | (merged["value_x1000_prev"] == 0))
+    )]
 
     merged["value_curr"] = merged["value_x1000_curr"].fillna(0)
     merged["value_prev"] = merged["value_x1000_prev"].fillna(0)
@@ -366,6 +434,7 @@ def find_initiations_liquidations(conn):
             LEFT JOIN institution_styles ist ON ih.institution_cik = ist.institution_cik
             WHERE ih.report_period = ?
             GROUP BY ih.institution_cik, ih.ticker
+            HAVING SUM(ih.value_x1000) > 0
         """, (period,)).fetchall()
         return {(r[0], r[2]): (r[1], r[3], r[4]) for r in rows}
 
@@ -412,6 +481,39 @@ def find_initiations_liquidations(conn):
 
 
 # ═══════════════════════════════════════════════════════════
+# 4b. Top Activists 排名（对应 IHS Markit 报告第 4 页）
+# ═══════════════════════════════════════════════════════════
+
+def rank_top_activists(conn):
+    """
+    从已采集的持仓中筛选 activist 机构的持仓，生成 IHS P4 格式的排名表。
+
+    Returns:
+        DataFrame，列 = [rank, institution_name, institution_cik,
+                         activism_level, total_value_x1000] +
+                        [CVNA, KMX, AN, UXIN, ATHM]
+    """
+    matrix = build_cross_holding_matrix(conn)
+    if matrix.empty:
+        return pd.DataFrame()
+
+    # 筛选 activism_level 不为空的机构
+    activists = matrix[
+        (matrix["activism_level"].notna()) & (matrix["activism_level"] != "")
+    ].copy()
+
+    if activists.empty:
+        logger.info("No activist institutions found in current holdings.")
+        return pd.DataFrame()
+
+    activists = activists.sort_values("total_value_x1000", ascending=False).reset_index(drop=True)
+    activists.insert(0, "rank", range(1, len(activists) + 1))
+
+    logger.info("  Found %d activist institutions with holdings", len(activists))
+    return activists
+
+
+# ═══════════════════════════════════════════════════════════
 # 5. Turnover Proxy 估算
 # ═══════════════════════════════════════════════════════════
 
@@ -439,6 +541,9 @@ def compute_turnover_proxy(conn):
     results = []
     for cik in qoq["institution_cik"].unique():
         inst_data = qoq[qoq["institution_cik"] == cik]
+        # BUG-6 fix: skip prev-only institutions (no current holdings → not meaningful)
+        if (inst_data["current_value"] == 0).all():
+            continue
         name = inst_data["institution_name"].iloc[0]
         style = inst_data["style_label"].iloc[0]
 
@@ -510,15 +615,21 @@ def compute_capital_flows_by_category(conn):
 
     Returns:
         dict:
-          - "by_style":   DataFrame[category, total_flow, ticker_CVNA, ...]
-          - "by_turnover": DataFrame
-          - "by_activism": DataFrame
+          - "by_style":      DataFrame[category, total_flow, ticker_CVNA, ...]
+          - "by_orientation": DataFrame[Active/Passive]
+          - "by_turnover":   DataFrame
+          - "by_activism":   DataFrame
+          - "pie_data":      {style, orientation, turnover} 各分类的占比数据
 
     注：⚠️ 依赖简化分类（非 IHS 等价）。
     """
     qoq = compute_qoq_changes(conn)
     if qoq.empty:
-        return {"by_style": pd.DataFrame(), "by_turnover": pd.DataFrame(), "by_activism": pd.DataFrame()}
+        return {
+            "by_style": pd.DataFrame(), "by_orientation": pd.DataFrame(),
+            "by_turnover": pd.DataFrame(), "by_activism": pd.DataFrame(),
+            "pie_data": {},
+        }
 
     # 附加 turnover + activism 标签
     turnover_df = compute_turnover_proxy(conn)
@@ -539,25 +650,89 @@ def compute_capital_flows_by_category(conn):
     qoq["turnover_label"] = qoq["institution_cik"].map(turnover_map).fillna("Unknown")
     qoq["activism"] = qoq["institution_cik"].map(activism_map).fillna("none")
 
+    # 0) Orientation: Index → Passive, 其余 → Active
+    style_map = dict(zip(styles["institution_cik"], styles["style_label"].fillna("Unclassified")))
+    qoq["orientation"] = qoq["institution_cik"].map(style_map).apply(
+        lambda x: "Passive" if x == "Index" else "Active"
+    )
+
     # 1) 按 style_label 归因
     by_style = _aggregate_flows(qoq, "style_label")
 
-    # 2) 按 turnover 归因
+    # 2) 按 orientation 归因 (Active / Passive 二分)
+    by_orientation = _aggregate_flows(qoq, "orientation")
+
+    # 3) 按 turnover 归因
     by_turnover = _aggregate_flows(qoq, "turnover_label")
 
-    # 3) 按 activism 归因
+    # 4) 按 activism 归因
     by_activism = _aggregate_flows(qoq, "activism")
 
     logger.info(
-        "  Capital flows by category: %d style buckets, %d turnover buckets, %d activism buckets",
-        len(by_style), len(by_turnover), len(by_activism),
+        "  Capital flows by category: %d style, %d orientation, %d turnover, %d activism buckets",
+        len(by_style), len(by_orientation), len(by_turnover), len(by_activism),
     )
+
+    # 构建饼图数据（各分类的机构数占比 + 资金流向占比）
+    pie_data = _compute_pie_data(conn, qoq)
 
     return {
         "by_style": by_style,
+        "by_orientation": by_orientation,
         "by_turnover": by_turnover,
         "by_activism": by_activism,
+        "pie_data": pie_data,
     }
+
+
+def _compute_pie_data(conn, qoq_df):
+    """
+    计算 IHS 报告第 8-10 页饼图所需的数据：
+    - Orientation: Active vs Passive 机构数占比
+    - Style: 3 类风格占比
+    - Turnover: Low/Medium/High 占比
+
+    Returns:
+        dict: {"orientation": DataFrame, "style": DataFrame, "turnover": DataFrame}
+              每个 DataFrame 有 label, count, pct 列
+    """
+    # 从 cross_holding_matrix 获取所有有风格标签的机构
+    matrix = pd.read_sql_query("""
+        SELECT institution_name, institution_cik, style_label, turnover_proxy, activism_level
+        FROM cross_holding_matrix
+        ORDER BY report_period DESC
+    """, conn)
+
+    if matrix.empty:
+        return {}
+
+    # 去重（同一机构多期只取最新）
+    matrix = matrix.drop_duplicates(subset="institution_cik", keep="first")
+
+    pie_data = {}
+
+    # Orientation pie: Index → Passive, 其余 → Active
+    matrix["orientation"] = matrix["style_label"].apply(
+        lambda x: "Passive" if x == "Index" else "Active"
+    )
+    orient_counts = matrix["orientation"].value_counts().reset_index()
+    orient_counts.columns = ["label", "count"]
+    orient_counts["pct"] = (orient_counts["count"] / orient_counts["count"].sum() * 100).round(1)
+    pie_data["orientation"] = orient_counts
+
+    # Style pie
+    style_counts = matrix["style_label"].value_counts().reset_index()
+    style_counts.columns = ["label", "count"]
+    style_counts["pct"] = (style_counts["count"] / style_counts["count"].sum() * 100).round(1)
+    pie_data["style"] = style_counts
+
+    # Turnover pie
+    turnover_counts = matrix["turnover_proxy"].value_counts().reset_index()
+    turnover_counts.columns = ["label", "count"]
+    turnover_counts["pct"] = (turnover_counts["count"] / turnover_counts["count"].sum() * 100).round(1)
+    pie_data["turnover"] = turnover_counts
+
+    return pie_data
 
 
 def _aggregate_flows(qoq_df, group_col):
@@ -584,12 +759,60 @@ def _aggregate_flows(qoq_df, group_col):
 
 
 # ═══════════════════════════════════════════════════════════
-# 6. Markdown 报告生成
+# 6. 报告模板引擎
 # ═══════════════════════════════════════════════════════════
+
+# Jinja2 模板目录
+_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+_jinja_env = Environment(loader=FileSystemLoader(str(_TEMPLATE_DIR)), autoescape=False)
+
+
+def _fmt_m(value_x1000):
+    """将 x1000 美元值格式化为 $M 字符串，0/- → '-'。"""
+    if value_x1000 is None:
+        return "-"
+    v = float(value_x1000)
+    if v == 0:
+        return "-"
+    return f"${v/1000:,.1f}"
+
+
+def _fmt_delta_m(value_x1000):
+    """将 x1000 美元变动值格式化为带正负号的 $M 字符串。"""
+    if value_x1000 is None:
+        return "-"
+    v = float(value_x1000)
+    if v == 0:
+        return "-"
+    return f"${v/1000:+,.1f}"
+
+
+def _df_rows(df, columns, formatters=None):
+    """将 DataFrame 转为 list[dict]（每行一个 dict），对指定列应用 formatters。"""
+    rows = []
+    for _, row in df.iterrows():
+        r = {}
+        for col in columns:
+            val = row.get(col)
+            if formatters and col in formatters:
+                val = formatters[col](val)
+            else:
+                val = val if val is not None else ""
+            r[col] = val
+        rows.append(r)
+    return rows
+
+
+def _lookup(df, key_col, val_col):
+    """从 DataFrame 构建 {key: value} 字典（快速 lookup）。"""
+    if df is None or df.empty:
+        return {}
+    return dict(zip(df[key_col], df[val_col]))
+
 
 def generate_cross_holding_report(conn):
     """
-    生成 Markdown 格式的交叉持股分析报告。
+    生成 Markdown 格式的交叉持股分析报告（Jinja2 模板渲染）。
 
     Returns:
         str: Markdown 报告内容
@@ -604,6 +827,9 @@ def generate_cross_holding_report(conn):
     sellers = rank_top_buyers_sellers(conn, "sellers", top_n=25)
     init_df, liq_df = find_initiations_liquidations(conn)
     turnover = compute_turnover_proxy(conn)
+    turnover_lookup = _lookup(turnover, "institution_cik", "churn_label")
+    activists = rank_top_activists(conn)
+    flows = compute_capital_flows_by_category(conn)
 
     # 报告期
     report_period = conn.execute("""
@@ -614,144 +840,154 @@ def generate_cross_holding_report(conn):
     period_str = report_period[0] if report_period else "未知"
 
     total_institutions = len(matrix)
-
-    # ── 报告正文 ──
-    lines = []
-    lines.append(f"# 竞品交叉持股分析报告")
-    lines.append(f"")
-    lines.append(f"> 报告期: **{period_str}**  |  生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    lines.append(f"> 覆盖机构: **{total_institutions}** 家  |  同业组: CVNA / KMX / AN / UXIN / ATHM")
-    lines.append(f"")
-    lines.append(f"---")
-    lines.append(f"")
-
-    # ── 1. Top Holders ──
-    lines.append(f"## 1. Top Holders 持仓排名")
-    lines.append(f"")
-    lines.append(f"| # | 机构 | 风格 | 总持仓 ($M) | CVNA ($M) | KMX ($M) | AN ($M) | UXIN ($M) | ATHM ($M) |")
-    lines.append(f"|---|------|------|------------|-----------|----------|---------|-----------|-----------|")
-
-    for i, (_, row) in enumerate(matrix.iterrows()):
-        lines.append(
-            f"| {i+1} | {row['institution_name']} | {row.get('style_label', '-')} | "
-            f"${row['total_value_x1000']/1000:,.1f} | "
-            f"${row['CVNA']/1000:,.1f} | ${row['KMX']/1000:,.1f} | "
-            f"${row['AN']/1000:,.1f} | ${row['UXIN']/1000:,.1f} | "
-            f"${row['ATHM']/1000:,.1f} |"
-        )
-
-    lines.append(f"")
-    lines.append(f"---")
-    lines.append(f"")
-
-    # ── 2. Top Buyers ──
-    lines.append(f"## 2. Top Peer Buyers（增持排名）")
-    lines.append(f"")
-    if not buyers.empty:
-        lines.append(f"| # | 机构 | 风格 | 总增持 ($M) | CVNA ($M) | KMX ($M) | AN ($M) | UXIN ($M) | ATHM ($M) |")
-        lines.append(f"|---|------|------|------------|-----------|----------|---------|-----------|-----------|")
-        for _, row in buyers.iterrows():
-            lines.append(
-                f"| {int(row['rank'])} | {row['institution_name']} | {row.get('style_label', '-')} | "
-                f"${row['total_change']/1000:,.1f} | "
-                f"${row.get('CVNA_change', 0)/1000:,.1f} | "
-                f"${row.get('KMX_change', 0)/1000:,.1f} | "
-                f"${row.get('AN_change', 0)/1000:,.1f} | "
-                f"${row.get('UXIN_change', 0)/1000:,.1f} | "
-                f"${row.get('ATHM_change', 0)/1000:,.1f} |"
-            )
-    else:
-        lines.append("暂无 QoQ 对比数据（需要至少两期 13F）。")
-    lines.append(f"")
-
-    # ── 3. Top Sellers ──
-    lines.append(f"## 3. Top Peer Sellers（减持排名）")
-    lines.append(f"")
-    if not sellers.empty:
-        lines.append(f"| # | 机构 | 风格 | 总减持 ($M) | CVNA ($M) | KMX ($M) | AN ($M) | UXIN ($M) | ATHM ($M) |")
-        lines.append(f"|---|------|------|------------|-----------|----------|---------|-----------|-----------|")
-        for _, row in sellers.iterrows():
-            lines.append(
-                f"| {int(row['rank'])} | {row['institution_name']} | {row.get('style_label', '-')} | "
-                f"${row['total_change']/1000:,.1f} | "
-                f"${abs(row.get('CVNA_change', 0))/1000:,.1f} | "
-                f"${abs(row.get('KMX_change', 0))/1000:,.1f} | "
-                f"${abs(row.get('AN_change', 0))/1000:,.1f} | "
-                f"${abs(row.get('UXIN_change', 0))/1000:,.1f} | "
-                f"${abs(row.get('ATHM_change', 0))/1000:,.1f} |"
-            )
-    else:
-        lines.append("暂无 QoQ 对比数据（需要至少两期 13F）。")
-    lines.append(f"")
-
-    # ── 4. Initiations ──
-    lines.append(f"## 4. Top Initiations（新建仓）")
-    lines.append(f"")
-    if not init_df.empty:
-        lines.append(f"| # | 机构 | 竞品 | 市值 ($M) | 风格 |")
-        lines.append(f"|---|------|------|----------|------|")
-        for i, (_, row) in enumerate(init_df.head(10).iterrows()):
-            lines.append(
-                f"| {i+1} | {row['institution_name']} | {row['ticker']} | "
-                f"${row['current_value']/1000:,.1f} | {row.get('style_label', '-')} |"
-            )
-    else:
-        lines.append("暂无新建仓记录。")
-    lines.append(f"")
-
-    # ── 5. Liquidations ──
-    lines.append(f"## 5. Top Liquidations（清仓）")
-    lines.append(f"")
-    if not liq_df.empty:
-        lines.append(f"| # | 机构 | 竞品 | 上期市值 ($M) | 风格 |")
-        lines.append(f"|---|------|------|-------------|------|")
-        for i, (_, row) in enumerate(liq_df.head(10).iterrows()):
-            lines.append(
-                f"| {i+1} | {row['institution_name']} | {row['ticker']} | "
-                f"${row['previous_value']/1000:,.1f} | {row.get('style_label', '-')} |"
-            )
-    else:
-        lines.append("暂无清仓记录。")
-    lines.append(f"")
-
-    # ── 6. Turnover ──
-    lines.append(f"## 6. 持仓变动率估算 (Turnover Proxy)")
-    lines.append(f"")
-    if not turnover.empty:
-        lines.append(f"| 机构 | Churn Proxy | 分档 | 风格 |")
-        lines.append(f"|------|------------|------|------|")
-        for _, row in turnover.iterrows():
-            lines.append(
-                f"| {row['institution_name']} | {row['churn_proxy']:.1f}% | "
-                f"{row['churn_label']} | {row.get('style_label', '-')} |"
-            )
-    lines.append(f"")
-
-    # ── 免责声明 ──
-    lines.append(f"---")
-    lines.append(f"")
-    lines.append(f"## ⚠️ 免责声明与差距说明")
-    lines.append(f"")
-    lines.append(f"1. **机构覆盖范围**：本报告仅覆盖 {total_institutions} 家种子机构（13F 申报人），")
-    lines.append(f"   不代表完整机构持有人全景。IHS Markit 报告覆盖全市场 ~5,000 家 13F 申报人。")
-    lines.append(f"")
-    lines.append(f"2. **投资风格标签**：本报告中的风格标签（Index / Active / Broker）为基于实体类型的简化分类，")
-    lines.append(f"   **非 IHS Markit 专业风格标签**（Value / Growth / GARP / Aggressive Growth 等 12 类）。")
-    lines.append(f"   详细差距说明见 `/Users/liuming/sec/prd/gap-analysis-ihs-markit.md`。")
-    lines.append(f"")
-    lines.append(f"3. **Turnover Proxy**：基于 QoQ 13F 快照的持仓变动率估算，非精确 portfolio turnover。")
-    lines.append(f"   IHS Markit 基于 12 个月日度交易数据计算 4 档分类（Low / Medium / High / Very Active）。")
-    lines.append(f"   **本报告为 3 档简化分类（Low / Medium / High）。**")
-    lines.append(f"")
-    lines.append(f"4. **数据时滞**：13F 数据滞后约 45 天（季末后 45 天申报截止）。")
-    lines.append(f"   本报告反映的是 **{period_str}** 季末的机构持仓情况，非实时持仓。")
-    lines.append(f"")
     activist_count = len(matrix[(matrix['activism_level'].notna()) & (matrix['activism_level'] != '')])
-    lines.append(f"5. **激进投资者标注**：仅基于静态种子名单（{activist_count} 家已知 activist），")
-    lines.append(f"   不保证覆盖所有有 activist 行为的机构。")
-    lines.append(f"")
 
-    return "\n".join(lines)
+    # ── 构建模板数据 ──
+
+    competitors = COMPETITOR_TICKERS  # ["CVNA", "KMX", "AN", "UXIN", "ATHM"]
+
+    # §1: Top Holders Positions
+    top_holders = []
+    for i, (_, row) in enumerate(matrix.iterrows()):
+        cik = row.get("institution_cik", "")
+        top_holders.append({
+            "rank": i + 1,
+            "name": row["institution_name"],
+            "style": row.get("style_label", "-"),
+            "turnover": turnover_lookup.get(cik, "-"),
+            "total": _fmt_m(row.get("total_value_x1000")),
+            "change": _fmt_delta_m(row.get("total_change_x1000")),
+            "peer_avg": _fmt_m(row.get("peer_avg_x1000")),
+            **{tk: _fmt_m(row.get(tk)) for tk in competitors},
+        })
+
+    # §2: QoQ Changes
+    qoq_changes = []
+    if not qoq.empty:
+        for i, (_, row) in enumerate(qoq.head(25).iterrows()):
+            qoq_changes.append({
+                "rank": i + 1,
+                "name": row["institution_name"],
+                "ticker": row["ticker"],
+                "current": _fmt_m(row.get("current_value")),
+                "previous": _fmt_m(row.get("previous_value")),
+                "delta": _fmt_delta_m(row.get("delta_value")),
+                "delta_pct": f"{row.get('delta_pct', 0):+.1f}%",
+                "style": row.get("style_label", "-"),
+            })
+
+    # §3: Activists
+    activists_rows = []
+    if not activists.empty:
+        for _, row in activists.iterrows():
+            activists_rows.append({
+                "rank": int(row.get("rank", 0)),
+                "name": row["institution_name"],
+                "activism": row.get("activism_level", "-"),
+                "total": _fmt_m(row.get("total_value_x1000")),
+                **{tk: _fmt_m(row.get(tk)) for tk in competitors},
+            })
+
+    # §4: Top Buyers
+    buyers_rows = []
+    if not buyers.empty:
+        for _, row in buyers.iterrows():
+            cik = row.get("institution_cik", "")
+            buyers_rows.append({
+                "rank": int(row.get("rank", 0)),
+                "name": row["institution_name"],
+                "style": row.get("style_label", "-"),
+                "turnover": turnover_lookup.get(cik, "-"),
+                "total": _fmt_m(row.get("total_change")),
+                **{tk: _fmt_m(row.get(f"{tk}_change")) for tk in competitors},
+            })
+
+    # §5: Top Sellers
+    sellers_rows = []
+    if not sellers.empty:
+        for _, row in sellers.iterrows():
+            cik = row.get("institution_cik", "")
+            # seller total_change is already abs()'d in rank_top_buyers_sellers
+            sellers_rows.append({
+                "rank": int(row.get("rank", 0)),
+                "name": row["institution_name"],
+                "style": row.get("style_label", "-"),
+                "turnover": turnover_lookup.get(cik, "-"),
+                "total": _fmt_m(row.get("total_change")),
+                **{tk: _fmt_m(abs(row.get(f"{tk}_change", 0))) for tk in competitors},
+            })
+
+    # §6-7: Initiations / Liquidations
+    initiations = []
+    if not init_df.empty:
+        for i, (_, row) in enumerate(init_df.head(10).iterrows()):
+            cik = row.get("institution_cik", "")
+            initiations.append({
+                "rank": i + 1,
+                "name": row["institution_name"],
+                "ticker": row["ticker"],
+                "value": _fmt_m(row.get("current_value")),
+                "style": row.get("style_label", "-"),
+                "turnover": turnover_lookup.get(cik, "-"),
+            })
+
+    liquidations = []
+    if not liq_df.empty:
+        for i, (_, row) in enumerate(liq_df.head(10).iterrows()):
+            cik = row.get("institution_cik", "")
+            liquidations.append({
+                "rank": i + 1,
+                "name": row["institution_name"],
+                "ticker": row["ticker"],
+                "value": _fmt_m(row.get("previous_value")),
+                "style": row.get("style_label", "-"),
+                "turnover": turnover_lookup.get(cik, "-"),
+            })
+
+    # §8: Investor Style Comparison (pie data)
+    pie_data = flows.get("pie_data", {})
+    orient_pie = pie_data.get("orientation", pd.DataFrame())
+    turn_pie = pie_data.get("turnover", pd.DataFrame())
+
+    orientation = []
+    if not orient_pie.empty:
+        for _, r in orient_pie.iterrows():
+            orientation.append({"label": str(r["label"]), "count": int(r["count"]), "pct": str(r["pct"])})
+
+    turnover_pie_rows = []
+    if not turn_pie.empty:
+        for _, r in turn_pie.iterrows():
+            turnover_pie_rows.append({"label": str(r["label"]), "count": int(r["count"]), "pct": str(r["pct"])})
+
+    # §9: Turnover Proxy
+    turnover_rows = []
+    if not turnover.empty:
+        for _, row in turnover.iterrows():
+            turnover_rows.append({
+                "name": row["institution_name"],
+                "churn": f"{row['churn_proxy']:.1f}%",
+                "label": row["churn_label"],
+                "style": row.get("style_label", "-"),
+            })
+
+    # ── 渲染 ──
+    template = _jinja_env.get_template("cross_holding_report.md.j2")
+    return template.render(
+        report_period=period_str,
+        generated_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        total_institutions=total_institutions,
+        activist_count=activist_count,
+        top_holders=top_holders,
+        qoq_changes=qoq_changes,
+        activists=activists_rows,
+        buyers=buyers_rows,
+        sellers=sellers_rows,
+        initiations=initiations,
+        liquidations=liquidations,
+        orientation=orientation,
+        turnover=turnover_pie_rows,
+        turnover_list=turnover_rows,
+    )
 
 
 # ═══════════════════════════════════════════════════════════
