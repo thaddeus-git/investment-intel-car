@@ -12,3 +12,7 @@ venv/
 .streamlit/secrets.toml
 .edgar/
 hisel_cache/
+.obsidian/
+# Locally generated fixtures / ad-hoc data
+/edgar_cache/
+/tmp_sec/
