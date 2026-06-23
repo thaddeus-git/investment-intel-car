@@ -1,0 +1,216 @@
+# ============================================================================
+# 金标准 Fixture — 13F 持仓归一化基准
+# ============================================================================
+# 每条 fixture 的 expected_value_usd / expected_shares 都由 agent 直接从 SEC
+# EDGAR 原始 infotable.xml 读出（绝不由本项目 DB 拷贝——DB 本身是要验证的对象）。
+#
+# 单位判断规则（与 src/sec_adapter.py 的 _normalize_value 对齐）：
+#   implied_price = value / shares
+#   - implied < $1.0   → <value> 单位是 $1000s，归一化美元 = value × 1000
+#   - implied $1–$1000 → <value> 已是美元，不变
+#   - implied > $1000  → 异常
+#
+# 同一机构同一标的常被拆成多个 <infoTable> 子行（sub-advisor 分仓）。
+# expected_value_usd / expected_shares 是「所有 SH 子行求和后再归一化」的结果。
+# （这正是 [[fmr-cik-change]] 记录的「13F 多行去重丢值 bug」要防的坑——不能只取一行。）
+#
+# verified_at: 2026-06-19   verified_by: agent + SEC raw XML (cross-validated)
+# 详见 README.md 的来源 URL 与验证方法。
+# ============================================================================
+
+golden_holdings:
+
+  # ---------- 大美元单位机构（<value> 直接是美元）----------
+
+  - id: "vanguard-cvna-2025q4"
+    institution_name: "Vanguard Group"
+    institution_cik: "0000102909"
+    ticker: "CVNA"
+    cusip: "146869102"
+    report_period: "2025-12-31"
+    filing_date: "2026-01-29"
+    expected_value_usd: 7082804283      # 6 个 sub-advisor 子行 value 求和
+    expected_shares: 16783101           # 6 个 SH 子行 shares 求和
+    expected_value_raw: 7082804283      # SEC <value> 原始求和（已是美元）
+    expected_implied_price: 422.02      # = expected_value_raw / shares → 单位=USD
+    unit: "USD"
+    n_sub_rows: 6
+    tolerance_pct: 0.01                 # 精确求和，1% 已足够容忍四舍五入
+    source_accession: "0000102909-26-000031"
+    source_url: "https://www.sec.gov/Archives/edgar/data/102909/000010290926000031/13F_0000102909_20251231.xml"
+    verified_at: "2026-06-19"
+    verified_by: "agent + SEC raw XML"
+    notes: >
+      大单位基准。Vanguard 是美元申报人。CVNA 2025-12-31 收盘 ~$422，与 implied $422.02
+      吻合。6 个子行（最大 6,494,113,815 / 15,388,166 股）必须求和——审计 [[audit-2026-06-19-critical-issues]]
+      B2 提及「实际 $7.08B」即此值。
+
+  - id: "vanguard-cvna-2025q3"
+    institution_name: "Vanguard Group"
+    institution_cik: "0000102909"
+    ticker: "CVNA"
+    cusip: "146869102"
+    report_period: "2025-09-30"
+    filing_date: "2025-11-07"
+    expected_value_usd: 5075758918
+    expected_shares: 13454986
+    expected_value_raw: 5075758918
+    expected_implied_price: 377.24
+    unit: "USD"
+    n_sub_rows: 6
+    tolerance_pct: 0.01
+    source_accession: "0000102909-25-000353"
+    source_url: "https://www.sec.gov/Archives/edgar/data/102909/000010290925000353/13F_0000102909_20250930.xml"
+    verified_at: "2026-06-19"
+    verified_by: "agent + SEC raw XML"
+    notes: >
+      跨季度基准（与 vanguard-cvna-2025q4 配对，验证 QoQ 一致性）。QoQ 变动
+      (7.08B−5.08B)/5.08B = +39.4%，低于 sanity max_qoq_change_pct 50%。
+      CVNA 2025-09-30 ~$377，与 implied $377.24 吻合。
+
+  - id: "fmr-cvna-2026q1"
+    institution_name: "FMR LLC (Fidelity)"
+    institution_cik: "0000315066"
+    ticker: "CVNA"
+    cusip: "146869102"
+    report_period: "2026-03-31"
+    filing_date: "2026-05-15"
+    expected_value_usd: 2341129769
+    expected_shares: 7446815
+    expected_value_raw: 2341129769
+    expected_implied_price: 314.38
+    unit: "USD"
+    n_sub_rows: 6
+    tolerance_pct: 0.01
+    source_accession: "0000315066-26-001390"
+    source_url: "https://www.sec.gov/Archives/edgar/data/315066/000031506626001390/20260515_FMRLLC.xml"
+    verified_at: "2026-06-19"
+    verified_by: "agent + SEC raw XML"
+    notes: >
+      大单位基准，最新期。FMR 是美元申报人。CVNA 2026-03-31 ~$314.38，与 implied 吻合。
+      （CVNA 同期 $314.38 跨 5 家机构一致——见 README 交叉验证。）
+      FMR 正确 CIK 是 0000315066（旧 0000938836 已 404，见 [[fmr-cik-change]]）。
+
+  - id: "state-street-cvna-2025q4"
+    institution_name: "State Street Corp"
+    institution_cik: "0000093751"
+    ticker: "CVNA"
+    cusip: "146869102"
+    report_period: "2025-12-31"
+    filing_date: "2026-02-13"
+    expected_value_usd: 2411751034
+    expected_shares: 5714779
+    expected_value_raw: 2411751034
+    expected_implied_price: 422.02
+    unit: "USD"
+    n_sub_rows: 1                     # State Street 单行申报，无分仓
+    tolerance_pct: 0.01
+    source_accession: "0000093751-26-000100"
+    source_url: "https://www.sec.gov/Archives/edgar/data/93751/000009375126000100/XML_Infotable.xml"
+    verified_at: "2026-06-19"
+    verified_by: "agent + SEC raw XML"
+    notes: >
+      大单位基准，单行申报（与 Vanguard 6 行形成对照，验证「求和逻辑对单行也不出错」）。
+      implied $422.02 与 Vanguard 同期一致 → CVNA 2025-12-31 真实价。
+
+  # ---------- 小美元单位机构（<value> 是 $1000s，需 ×1000 归一化）----------
+  # 这两条是审计 B1（单位混存）的核心回归测试。
+
+  - id: "troweprice-cvna-2026q1"
+    institution_name: "T. Rowe Price Associates"
+    institution_cik: "0000080255"
+    ticker: "CVNA"
+    cusip: "146869102"
+    report_period: "2026-03-31"
+    filing_date: "2026-05-15"
+    expected_value_usd: 5590214000     # raw 5,590,214 × 1000
+    expected_shares: 17781707
+    expected_value_raw: 5590214        # SEC <value> 原始求和（$1000s）
+    expected_implied_price: 0.31438    # raw implied < $1 → 单位=$1000s
+    unit: "1000s"
+    n_sub_rows: 2
+    tolerance_pct: 0.01
+    source_accession: "0000080255-26-000381"
+    source_url: "https://www.sec.gov/Archives/edgar/data/80255/000008025526000381/infotable.xml"
+    verified_at: "2026-06-19"
+    verified_by: "agent + SEC raw XML"
+    notes: >
+      小单位基准（B1 关键）。T. Rowe Price 仍按旧规范以 $1000s 填 <value>。
+      raw implied $0.31438 < $1 → 归一化 ×1000 → $5,590,214,000 / 17,781,707 = $314.38
+      = CVNA 2026-03-31 真实价。若 adapter 漏 ×1000，DB 会存 $5.59M（错 1000×）。
+
+  - id: "lsv-an-2026q1"
+    institution_name: "LSV Asset Management"
+    institution_cik: "0001050470"
+    ticker: "AN"
+    cusip: "05329W102"
+    report_period: "2026-03-31"
+    filing_date: "2026-05-11"
+    expected_value_usd: 97193000       # raw 97,193 × 1000
+    expected_shares: 497760
+    expected_value_raw: 97193          # SEC <value> 原始（$1000s）
+    expected_implied_price: 0.19526    # raw implied < $1 → 单位=$1000s
+    unit: "1000s"
+    n_sub_rows: 1
+    tolerance_pct: 0.01
+    source_accession: "0001050470-26-000004"
+    source_url: "https://www.sec.gov/Archives/edgar/data/1050470/000105047026000004/Holdings20260511.xml"
+    verified_at: "2026-06-19"
+    verified_by: "agent + SEC raw XML"
+    notes: >
+      小单位基准（第 2 条，不同机构不同标的）。LSV 也是 $1000s 申报人。
+      raw implied $0.19526 < $1 → ×1000 → $97,193,000 / 497,760 = $195.26
+      = AutoNation(AN) 2026-03-31 真实价（与 Bridgewater/Citadel 同期 AN implied $195.26 交叉一致）。
+      LSV 不持有 CVNA，故改用 AN——spec 允许「任何持仓」。
+
+  # ---------- 小持仓（验证不会过度归一化）----------
+
+  - id: "citadel-sah-2026q1"
+    institution_name: "Citadel Advisors"
+    institution_cik: "0001423053"
+    ticker: "SAH"
+    cusip: "83545G102"
+    report_period: "2026-03-31"
+    filing_date: "2026-05-15"
+    expected_value_usd: 465247         # 小持仓，美元单位，必须「不」×1000
+    expected_shares: 6785
+    expected_value_raw: 465247
+    expected_implied_price: 68.57      # implied $1–$1000 → 已是美元，不变
+    unit: "USD"
+    n_sub_rows: 1
+    tolerance_pct: 0.01
+    source_accession: "0001104659-26-062477"
+    source_url: "https://www.sec.gov/Archives/edgar/data/1423053/000110465926062477/infotable.xml"
+    verified_at: "2026-06-19"
+    verified_by: "agent + SEC raw XML"
+    notes: >
+      小持仓过度归一化守卫。Citadel 是美元申报人；SAH(Sonic Automotive) 小持仓 $465K，
+      implied $68.57（SAH 2026-03-31 ~$68，吻合）。若 adapter 误对「小 value」×1000，
+      会变 $465,247,000（错 1000×）——此 fixture 专门抓这类过度归一化。
+      单 SH 子行，无 put/call 干扰（Citadel 其它标的多有 Call/Put 行，已避开）。
+
+# ============================================================================
+# Sanity bounds — fixture 之外的保底护栏，adapter 出口 / DB 写入前都应满足
+# ============================================================================
+
+sanity_bounds:
+  max_single_holding_usd: 20000000000      # $20B / 单机构单股（Vanguard CVNA $7.08B 远低于）
+  min_holding_usd: 1                       # $1 下限
+  max_qoq_change_pct: 0.50                 # 50% QoQ 单股最大变动（Vanguard CVNA Q3→Q4 +39.4% 在内）
+  min_institutions_per_competitor: 5       # 每只竞品至少 5 家持有
+  max_implied_share_price: 1000            # 隐含股价上限（adapter 阈值上界）
+  min_implied_share_price_per_unit: 0.01   # 隐含股价下限（避免除零）
+
+# ============================================================================
+# 元数据
+# ============================================================================
+
+meta:
+  fixture_count: 7
+  coverage:
+    large_unit_usd: 4        # vanguard-q4, vanguard-q3, fmr-q1, state-street-q4
+    small_unit_1000s: 2      # troweprice-q1, lsv-q1
+    cross_quarter: 1         # vanguard q3↔q4 配对
+    small_holding: 1         # citadel-sah（过度归一化守卫）
+  build_date: "2026-06-19"
+  user_agent: "thaddeus thaddeus@example.com"
