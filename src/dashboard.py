@@ -586,13 +586,15 @@ def _load_cross_holding_derived():
             find_initiations_liquidations,
             compute_turnover_proxy,
             rank_top_buyers_sellers,
+            rank_holders_by_change,
         )
         qoq = compute_qoq_changes(conn)
         buyers = rank_top_buyers_sellers(conn, "buyers", top_n=25)
         sellers = rank_top_buyers_sellers(conn, "sellers", top_n=25)
         init_df, liq_df = find_initiations_liquidations(conn)
         turnover = compute_turnover_proxy(conn)
-        return qoq, buyers, sellers, init_df, liq_df, turnover
+        holders_change = rank_holders_by_change(conn, top_n=25)
+        return qoq, buyers, sellers, init_df, liq_df, turnover, holders_change
     finally:
         conn.close()
 
@@ -662,7 +664,7 @@ def render_cross_holding(cross_matrix_df, inst_signal_df):
     style_map = dict(zip(cross_matrix_df["institution_cik"], cross_matrix_df["style_label"])) if "style_label" in cross_matrix_df.columns and "institution_cik" in cross_matrix_df.columns else {}
 
     # ── 从 cross_holding 模块获取派生数据（替代原有的 inline QoQ 计算） ──
-    qoq_df, buyers_df, sellers_df, init_df, liq_df, turnover_df = _load_cross_holding_derived()
+    qoq_df, buyers_df, sellers_df, init_df, liq_df, turnover_df, holders_change_df = _load_cross_holding_derived()
 
     # 获取两个最近报告期（用于 Tab 2 的 caption）
     qoq_periods = sorted(cross_matrix_df["report_period"].dropna().unique(), reverse=True)[:2] if "report_period" in cross_matrix_df.columns else []
@@ -721,26 +723,55 @@ def render_cross_holding(cross_matrix_df, inst_signal_df):
 
             st.caption("<!-- Commentary -->")
 
-    # ── Tab 2: QoQ 变动（数据来自 cross_holding.compute_qoq_changes） ──
+    # ── Tab 2: QoQ 变动（机构级汇总 + 可折叠明细） ──
     with tabs[1]:
-        st.markdown("#### QoQ 持仓变动")
+        st.markdown("#### QoQ 持仓变动（按机构汇总）")
         if not qoq_has_data:
             st.info("需要至少两期 13F 数据才能显示 QoQ 变动。")
         else:
             if len(qoq_periods) >= 2:
                 st.caption(f"对比期: {qoq_periods[1]} → {qoq_periods[0]}")
-            display = qoq_df.head(30).copy()
-            display["Δ ($M)"] = display["delta_value"].apply(lambda x: f"${x/1000:+,.1f}M" if x != 0 else "-")
-            display["当前 ($M)"] = display["current_value"].apply(lambda x: f"${x/1000:,.1f}M" if pd.notna(x) and x > 0 else "-")
-            display["上期 ($M)"] = display["previous_value"].apply(lambda x: f"${x/1000:,.1f}M" if pd.notna(x) and x > 0 else "-")
-            display["风格"] = display["institution_cik"].map(style_map).fillna("-")
-            display["Turnover"] = display["institution_cik"].map(turnover_lookup).fillna("-")
-            st.dataframe(
-                display[["institution_name", "ticker", "当前 ($M)", "上期 ($M)", "Δ ($M)", "风格", "Turnover"]].rename(
-                    columns={"institution_name": "机构", "ticker": "竞品"}
-                ),
-                width='stretch', hide_index=True,
-            )
+            # 默认展示机构汇总表（IHS Markit P3 "Top Holders Changes"）
+            if not holders_change_df.empty:
+                hc = holders_change_df.copy()
+                display = hc[[
+                    "rank", "institution_name", "style_label", "turnover_label",
+                    "total_change", "peer_avg_change",
+                ] + [f"{tk}_change" for tk in competitor_tickers]].copy()
+                display["机构"] = display["institution_name"]
+                display["风格"] = display["style_label"].fillna("-")
+                display["Turnover"] = display["turnover_label"].fillna("-")
+                display["Total Change"] = display["total_change"].apply(
+                    lambda x: f"${x/1000:+,.1f}M" if pd.notna(x) and x != 0 else "-")
+                display["Peer Avg Change"] = display["peer_avg_change"].apply(
+                    lambda x: f"${x/1000:+,.1f}M" if pd.notna(x) and x != 0 else "-")
+                for tk in competitor_tickers:
+                    col = f"{tk}_change"
+                    display[tk] = display[col].apply(
+                        lambda x: f"${x/1000:+,.1f}M" if pd.notna(x) and x != 0 else "-")
+                st.dataframe(
+                    display[["rank", "机构", "风格", "Turnover", "Total Change", "Peer Avg Change"] + competitor_tickers].rename(
+                        columns={"rank": "#"}
+                    ),
+                    width='stretch', hide_index=True,
+                )
+            else:
+                st.info("暂无机构级 QoQ 汇总数据。")
+
+            # 旧格式：机构×竞品 明细（可折叠）
+            with st.expander("📋 机构×竞品 明细"):
+                detail = qoq_df.head(50).copy()
+                detail["Δ ($M)"] = detail["delta_value"].apply(lambda x: f"${x/1000:+,.1f}M" if x != 0 else "-")
+                detail["当前 ($M)"] = detail["current_value"].apply(lambda x: f"${x/1000:,.1f}M" if pd.notna(x) and x > 0 else "-")
+                detail["上期 ($M)"] = detail["previous_value"].apply(lambda x: f"${x/1000:,.1f}M" if pd.notna(x) and x > 0 else "-")
+                detail["风格"] = detail["institution_cik"].map(style_map).fillna("-")
+                detail["Turnover"] = detail["institution_cik"].map(turnover_lookup).fillna("-")
+                st.dataframe(
+                    detail[["institution_name", "ticker", "当前 ($M)", "上期 ($M)", "Δ ($M)", "风格", "Turnover"]].rename(
+                        columns={"institution_name": "机构", "ticker": "竞品"}
+                    ),
+                    width='stretch', hide_index=True,
+                )
             st.caption("<!-- Commentary -->")
 
     # ── Tab 3: Activists ──
