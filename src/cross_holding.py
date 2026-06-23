@@ -345,6 +345,93 @@ def _load_styles_lookup(conn):
     return {r[0]: r[1] for r in rows}
 
 
+def rank_holders_by_change(conn, top_n=25):
+    """
+    按机构汇总 QoQ 持仓变动，一行一机构。
+
+    对应 IHS Markit P3 "Top Holders Changes"：每个机构一行，
+    列含 Total Change / Peer Avg Change / 各竞品变动。
+
+    与 rank_top_buyers_sellers() 的区别：
+    - 不区分 buyers/sellers，全部机构按 |Total Change| 降序
+    - 增加 peer_avg_change = total_change / 该机构实际持有的竞品数
+
+    Args:
+        conn: SQLite 连接
+        top_n: 返回前 N 名
+
+    Returns:
+        DataFrame，列 = [rank, institution_name, institution_cik,
+                         total_change, peer_avg_change, style_label,
+                         turnover_label] +
+                        [CVNA_change, KMX_change, AN_change,
+                         UXIN_change, ATHM_change]
+    """
+    qoq = compute_qoq_changes(conn)
+    if qoq.empty:
+        return pd.DataFrame()
+
+    # 1) 按机构汇总 delta_value → total_change
+    agg = qoq.groupby(["institution_name", "institution_cik"], dropna=False).agg(
+        total_change=("delta_value", "sum"),
+    ).reset_index()
+
+    # 2) peer_avg_change = total_change / 该机构实际持有的竞品数
+    #    （有变动的竞品数，非固定 /5）
+    held_counts = qoq.groupby("institution_cik")["ticker"].nunique()
+    agg["peer_avg_change"] = agg.apply(
+        lambda r: r["total_change"] / held_counts.get(r["institution_cik"], 1)
+        if held_counts.get(r["institution_cik"], 0) > 0
+        else 0,
+        axis=1,
+    )
+
+    # 3) 各竞品变动通过 pivot 展开
+    pivot = qoq.pivot_table(
+        index="institution_cik",
+        columns="ticker",
+        values="delta_value",
+        aggfunc="sum",
+        fill_value=0,
+    ).reset_index()
+    for tk in COMPETITOR_TICKERS:
+        col = f"{tk}_change"
+        if tk in pivot.columns:
+            pivot = pivot.rename(columns={tk: col})
+        else:
+            pivot[col] = 0.0
+    pivot = pivot[["institution_cik"] + [f"{tk}_change" for tk in COMPETITOR_TICKERS]]
+
+    agg = agg.merge(pivot, on="institution_cik", how="left")
+    for tk in COMPETITOR_TICKERS:
+        agg[f"{tk}_change"] = agg[f"{tk}_change"].fillna(0)
+
+    # 4) JOIN style_label + turnover_label
+    styles = _load_styles_lookup(conn)
+    agg["style_label"] = agg["institution_cik"].map(styles).fillna("Unclassified")
+
+    turnover = compute_turnover_proxy(conn)
+    turnover_map = dict(zip(
+        turnover["institution_cik"], turnover["churn_label"],
+    )) if not turnover.empty else {}
+    agg["turnover_label"] = agg["institution_cik"].map(turnover_map).fillna("-")
+
+    # 5) 按 |total_change| 降序 + rank
+    agg = agg.sort_values("total_change", key=abs, ascending=False).reset_index(drop=True)
+    agg = agg.head(top_n).reset_index(drop=True)
+    agg.insert(0, "rank", range(1, len(agg) + 1))
+
+    # 列顺序
+    col_order = [
+        "rank", "institution_name", "institution_cik",
+        "total_change", "peer_avg_change", "style_label", "turnover_label",
+    ] + [f"{tk}_change" for tk in COMPETITOR_TICKERS]
+    agg = agg[[c for c in col_order if c in agg.columns]]
+
+    logger.info("  Ranked %d holders by total change", len(agg))
+    return agg
+
+
 # ═══════════════════════════════════════════════════════════
 # 3. Top Buyers / Sellers 排名
 # ═══════════════════════════════════════════════════════════
@@ -844,7 +931,8 @@ def generate_cross_holding_report(conn):
 
     # ── 构建模板数据 ──
 
-    competitors = COMPETITOR_TICKERS  # ["CVNA", "KMX", "AN", "UXIN", "ATHM"]
+    competitors = COMPETITOR_TICKERS
+    competitors_display = " / ".join(competitors)
 
     # §1: Top Holders Positions
     top_holders = []
@@ -861,19 +949,20 @@ def generate_cross_holding_report(conn):
             **{tk: _fmt_m(row.get(tk)) for tk in competitors},
         })
 
-    # §2: QoQ Changes
+    # §2: QoQ Changes — 机构级汇总（对应 IHS Markit P3 "Top Holders Changes"）
     qoq_changes = []
-    if not qoq.empty:
-        for i, (_, row) in enumerate(qoq.head(25).iterrows()):
+    holders_change = rank_holders_by_change(conn)
+    if not holders_change.empty:
+        for _, row in holders_change.iterrows():
+            cik = row.get("institution_cik", "")
             qoq_changes.append({
-                "rank": i + 1,
+                "rank": int(row.get("rank", 0)),
                 "name": row["institution_name"],
-                "ticker": row["ticker"],
-                "current": _fmt_m(row.get("current_value")),
-                "previous": _fmt_m(row.get("previous_value")),
-                "delta": _fmt_delta_m(row.get("delta_value")),
-                "delta_pct": f"{row.get('delta_pct', 0):+.1f}%",
                 "style": row.get("style_label", "-"),
+                "turnover": turnover_lookup.get(cik, "-"),
+                "total_change": _fmt_delta_m(row.get("total_change")),
+                "peer_avg_change": _fmt_delta_m(row.get("peer_avg_change")),
+                **{tk: _fmt_delta_m(row.get(f"{tk}_change")) for tk in competitors},
             })
 
     # §3: Activists
@@ -944,31 +1033,105 @@ def generate_cross_holding_report(conn):
                 "turnover": turnover_lookup.get(cik, "-"),
             })
 
-    # §8: Investor Style Comparison (pie data)
+    # §8: Investor Style Comparison (pie data + capital flow breakdown)
     pie_data = flows.get("pie_data", {})
     orient_pie = pie_data.get("orientation", pd.DataFrame())
     turn_pie = pie_data.get("turnover", pd.DataFrame())
+    by_orient_flow = flows.get("by_orientation", pd.DataFrame())
+    by_turn_flow = flows.get("by_turnover", pd.DataFrame())
 
-    orientation = []
-    if not orient_pie.empty:
-        for _, r in orient_pie.iterrows():
-            orientation.append({"label": str(r["label"]), "count": int(r["count"]), "pct": str(r["pct"])})
+    def _build_breakdown_rows(pie_df, flow_df, flow_label_col):
+        """合并 pie data (count/pct) 与 flows data (by-ticker + total_flow)。"""
+        if pie_df is None or pie_df.empty:
+            return []
+        flow_lookup = {}
+        if flow_df is not None and not flow_df.empty:
+            for _, fr in flow_df.iterrows():
+                flow_lookup[str(fr[flow_label_col])] = fr
+        rows = []
+        for _, r in pie_df.iterrows():
+            label = str(r["label"])
+            flow = flow_lookup.get(label)
+            if flow is not None and pd.notna(flow.get("total_flow")):
+                net_flow = _fmt_delta_m(flow.get("total_flow", 0))
+                tk_break = {tk: _fmt_delta_m(flow.get(tk, 0)) for tk in competitors}
+            else:
+                net_flow = "-"
+                tk_break = {tk: "-" for tk in competitors}
+            rows.append({
+                "label": label,
+                "count": int(r["count"]),
+                "pct": str(r["pct"]),
+                "net_flow": net_flow,
+                **tk_break,
+            })
+        return rows
 
-    turnover_pie_rows = []
-    if not turn_pie.empty:
-        for _, r in turn_pie.iterrows():
-            turnover_pie_rows.append({"label": str(r["label"]), "count": int(r["count"]), "pct": str(r["pct"])})
+    orientation = _build_breakdown_rows(orient_pie, by_orient_flow, "orientation")
+    turnover_breakdown = _build_breakdown_rows(turn_pie, by_turn_flow, "turnover_label")
 
-    # §9: Turnover Proxy
+    # §8 资金流向文字描述（净流入 / 净流出 / 持平）
+    def _flow_direction(value_x1000):
+        if value_x1000 is None:
+            return "无数据"
+        v = float(value_x1000)
+        if v > 0:
+            return "净流入"
+        if v < 0:
+            return "净流出"
+        return "持平"
+
+    def _flow_label_dict(value_x1000):
+        return {
+            "direction": _flow_direction(value_x1000),
+            "amount": _fmt_delta_m(value_x1000) if value_x1000 is not None else "-",
+        }
+
+    def _flow_lookup(flow_df, group_col):
+        if flow_df is None or flow_df.empty:
+            return {}
+        return {str(r[group_col]): float(r["total_flow"])
+                for _, r in flow_df.iterrows()
+                if pd.notna(r.get("total_flow"))}
+
+    orient_flow_map = _flow_lookup(by_orient_flow, "orientation")
+    turn_flow_map = _flow_lookup(by_turn_flow, "turnover_label")
+
+    active_flow = _flow_label_dict(orient_flow_map.get("Active"))
+    passive_flow = _flow_label_dict(orient_flow_map.get("Passive"))
+    low_flow = _flow_label_dict(turn_flow_map.get("Low"))
+    medium_flow = _flow_label_dict(turn_flow_map.get("Medium"))
+    high_flow = _flow_label_dict(turn_flow_map.get("High"))
+
+    # §9: Turnover Proxy — 详细列表 + 分档统计汇总
     turnover_rows = []
+    turnover_tier_counts = {"Low": 0, "Medium": 0, "High": 0, "Unknown": 0}
     if not turnover.empty:
         for _, row in turnover.iterrows():
+            churn_label = row.get("churn_label", "Unknown")
+            if churn_label in turnover_tier_counts:
+                turnover_tier_counts[churn_label] += 1
+            else:
+                turnover_tier_counts["Unknown"] += 1
             turnover_rows.append({
                 "name": row["institution_name"],
                 "churn": f"{row['churn_proxy']:.1f}%",
-                "label": row["churn_label"],
+                "label": churn_label,
                 "style": row.get("style_label", "-"),
             })
+
+    # §9 分档统计汇总（按 Low → Medium → High → Unknown 顺序）
+    turnover_tier_order = ["Low", "Medium", "High", "Unknown"]
+    total_with_tier = sum(turnover_tier_counts.values())
+    turnover_tiers = []
+    for tier in turnover_tier_order:
+        count = turnover_tier_counts[tier]
+        pct = round(count / total_with_tier * 100, 1) if total_with_tier > 0 else 0.0
+        turnover_tiers.append({
+            "label": tier,
+            "count": count,
+            "pct": pct,
+        })
 
     # ── 渲染 ──
     template = _jinja_env.get_template("cross_holding_report.md.j2")
@@ -977,6 +1140,8 @@ def generate_cross_holding_report(conn):
         generated_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
         total_institutions=total_institutions,
         activist_count=activist_count,
+        competitors_display=competitors_display,
+        competitor_tickers=competitors,
         top_holders=top_holders,
         qoq_changes=qoq_changes,
         activists=activists_rows,
@@ -985,8 +1150,14 @@ def generate_cross_holding_report(conn):
         initiations=initiations,
         liquidations=liquidations,
         orientation=orientation,
-        turnover=turnover_pie_rows,
+        turnover_breakdown=turnover_breakdown,
+        active_flow=active_flow,
+        passive_flow=passive_flow,
+        low_flow=low_flow,
+        medium_flow=medium_flow,
+        high_flow=high_flow,
         turnover_list=turnover_rows,
+        turnover_tiers=turnover_tiers,
     )
 
 
