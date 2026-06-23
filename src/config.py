@@ -6,16 +6,17 @@ from pathlib import Path
 # ── edgartools identity（SEC 要求，必须设置后调 API） ──
 EDGAR_IDENTITY = "CompetitorIntel/1.0 (your-email@company.com)"
 
-# ── 5 家竞品 ──
+# ── 17 家竞品（汽车零售生态对标组） ──
 # CIK 必须是 10 位 padded 格式
 COMPETITORS = [
+    # ── 线上二手车零售商（最直接对标） ──
     {
         "ticker": "CVNA",
         "cik":   "0001690820",
         "name":  "Carvana Co.",
         "name_cn": "Carvana",
         "sic":   "5500",
-        "has_section16": True,   # 美国公司，适用 SEC Section 16
+        "has_section16": True,
     },
     {
         "ticker": "KMX",
@@ -25,6 +26,7 @@ COMPETITORS = [
         "sic":   "5500",
         "has_section16": True,
     },
+    # ── 大型经销商集团 ──
     {
         "ticker": "AN",
         "cik":   "0000350698",
@@ -33,6 +35,97 @@ COMPETITORS = [
         "sic":   "5500",
         "has_section16": True,
     },
+    {
+        "ticker": "LAD",
+        "cik":   "0001023128",
+        "name":  "Lithia Motors, Inc.",
+        "name_cn": "Lithia",
+        "sic":   "5500",
+        "has_section16": True,
+    },
+    {
+        "ticker": "PAG",
+        "cik":   "0001019849",
+        "name":  "Penske Automotive Group, Inc.",
+        "name_cn": "Penske",
+        "sic":   "5500",
+        "has_section16": True,
+    },
+    {
+        "ticker": "GPI",
+        "cik":   "0001031203",
+        "name":  "Group 1 Automotive, Inc.",
+        "name_cn": "Group 1",
+        "sic":   "5500",
+        "has_section16": True,
+    },
+    {
+        "ticker": "SAH",
+        "cik":   "0001043509",
+        "name":  "Sonic Automotive, Inc.",
+        "name_cn": "Sonic",
+        "sic":   "5500",
+        "has_section16": True,
+    },
+    {
+        "ticker": "ABG",
+        "cik":   "0001144980",
+        "name":  "Asbury Automotive Group, Inc.",
+        "name_cn": "Asbury",
+        "sic":   "5500",
+        "has_section16": True,
+    },
+    # ── 线上汽车交易/信息平台 ──
+    {
+        "ticker": "CARG",
+        "cik":   "0001494259",
+        "name":  "CarGurus, Inc.",
+        "name_cn": "CarGurus",
+        "sic":   "7370",
+        "has_section16": True,
+    },
+    {
+        "ticker": "CARS",
+        "cik":   "0001683606",
+        "name":  "Cars.com Inc.",
+        "name_cn": "Cars.com",
+        "sic":   "7370",
+        "has_section16": True,
+    },
+    {
+        "ticker": "TRUE",
+        "cik":   "0001327318",
+        "name":  "TrueCar, Inc.",
+        "name_cn": "TrueCar",
+        "sic":   "7370",
+        "has_section16": True,
+    },
+    # ── 批发拍卖 ──
+    {
+        "ticker": "KAR",
+        "cik":   "0001395942",
+        "name":  "OPENLANE, Inc.",
+        "name_cn": "OPENLANE",
+        "sic":   "5500",
+        "has_section16": True,
+    },
+    {
+        "ticker": "ACVA",
+        "cik":   "0001637873",
+        "name":  "ACV Auctions Inc.",
+        "name_cn": "ACV Auctions",
+        "sic":   "7389",
+        "has_section16": True,
+    },
+    {
+        "ticker": "RUSHA",
+        "cik":   "0001012019",
+        "name":  "Rush Enterprises, Inc.",
+        "name_cn": "Rush Enterprises",
+        "sic":   "5500",
+        "has_section16": True,
+    },
+    # ── 中国竞品（ADR） ──
     {
         "ticker": "UXIN",
         "cik":   "0001729173",
@@ -48,6 +141,15 @@ COMPETITORS = [
         "name_cn": "汽车之家",
         "sic":   "7370",
         "has_section16": False,  # ADR 结构，中国高管不受 Section 16 管辖
+    },
+    # ── 线上二手车（濒临退市，保留监控） ──
+    {
+        "ticker": "VRM",
+        "cik":   "0001580864",
+        "name":  "Vroom, Inc.",
+        "name_cn": "Vroom",
+        "sic":   "5500",
+        "has_section16": True,
     },
 ]
 
@@ -114,36 +216,45 @@ METRIC_CATEGORIES = {
 }
 
 # ── 13F 机构持仓监控 — 目标机构池（CIK → 机构名） ──
-# 用于反向查询"哪些大机构持有竞品股票"。
-# 13F 只能正向查（某机构持有啥），不能反向查（谁持有某股票），
-# 所以需要维护一个种子机构列表，逐一拉取 13F 后 grep 竞品 ticker。
-# 数据源：NASDAQ.com / WhaleWisdom / SEC EDGAR Full-Text Search
+# 31 家种子机构，CIK 经 SEC JSON API + 13F 申报 + SEC EDGAR 网页搜索三重验证（2026-06-18 R2）。
+# R2 新增 6 家：Baillie Gifford / Geode / Nuveen / AllianceBernstein / LSV / Legal & General
 TOP_INSTITUTIONS = {
-    "0001067983": "Berkshire Hathaway",
-    "0001364742": "BlackRock",
+    # ── Index / Passive ──
     "0000102909": "Vanguard Group",
+    "0001364742": "BlackRock",
     "0000093751": "State Street",
-    "0001037389": "Renaissance Technologies",
-    "0001061165": "Baillie Gifford",
-    "0000938836": "FMR (Fidelity)",
-    "0001350694": "T. Rowe Price",
-    "0001423053": "Geode Capital",
-    "0001103804": "Morgan Stanley",
-    "0000769993": "Goldman Sachs",
-    "0000312769": "JPMorgan Chase",
-    "0001567619": "Citadel Advisors",
-    "0001166559": "Dimensional Fund Advisors",
-    "0000355911": "Wellington Management",
-    "0001418814": "Invesco",
-    "0000915002": "Northern Trust",
+    "0000073124": "Northern Trust",
+    "0001214717": "Geode Capital Management",
+    # ── Broker / Dealer ──
+    "0000895421": "Morgan Stanley",
+    "0000886982": "Goldman Sachs Group",
+    # ── Active — 资产管理巨头 ──
+    "0000315066": "FMR LLC (Fidelity)",
+    "0000080255": "T. Rowe Price Associates",
+    "0000354204": "Dimensional Fund Advisors",
+    "0000914208": "Invesco",
+    "0000820027": "Ameriprise Financial",
+    "0000038777": "Franklin Resources",
     "0000070858": "Bank of America",
-    "0001179392": "Nuveen Asset Management",
-    "0000312435": "Franklin Resources",
-    "0000893749": "AllianceBernstein",
-    "0000868154": "LSV Asset Management",
-    "0001688453": "Two Sigma Investments",
-    "0001178453": "Legal & General Group",
-    "0001336528": "Ameriprise Financial",
+    "0000019617": "JPMorgan Chase",
+    "0001088875": "Baillie Gifford & Co",
+    "0001521019": "Nuveen Asset Management",
+    "0001109448": "AllianceBernstein",
+    "0001050470": "LSV Asset Management",
+    "0000764068": "Legal & General Group",
+    # ── Active — 对冲基金 / Alternative ──
+    "0001037389": "Renaissance Technologies",
+    "0001423053": "Citadel Advisors",
+    "0001179392": "Two Sigma Investments",
+    "0000902219": "Wellington Management",
+    "0001350694": "Bridgewater Associates",
+    "0001103804": "Viking Global Investors",
+    "0001061165": "Lone Pine Capital",
+    "0001418814": "ValueAct Holdings",
+    "0001336528": "Pershing Square Capital",
+    # ── 其他 ──
+    "0001067983": "Berkshire Hathaway",
+    "0001166559": "Bill & Melinda Gates Foundation Trust",
 }
 
 # 13F 调度：季末日期 → 季末+50天（13F 截止日后）的采集日期
@@ -156,51 +267,55 @@ SCHEDULE_13F = {
 }
 
 # ── 模块 F：交叉持股分析 — 机构风格静态标签 ──
-# ⚠️ 这是基于实体类型的简化分类，非 IHS Markit 专业风格标签。
-# 详细差距说明见 /Users/liuming/sec/prd/gap-analysis-ihs-markit.md
+# ⚠️ 这是基于实体类型的简化分类，非 IHS Markit 专业风格标签（12 类）。
+# CIK 经 2026-06-18 SEC JSON API 全面验证修正。
 
 # 激进投资者名单（来源：公开 13D 记录 / WhaleWisdom）
 # activism_level: "often" = 有多次 activist campaign 记录, "occasional" = 偶尔参与
 ACTIVIST_INSTITUTIONS = {
-    "0000938836": {"name": "FMR (Fidelity)", "activism_level": "occasional"},
-    "0001350694": {"name": "T. Rowe Price", "activism_level": "occasional"},
-    "0001061165": {"name": "Baillie Gifford", "activism_level": "occasional"},
-    "0001567619": {"name": "Citadel Advisors", "activism_level": "often"},
-    "0001688453": {"name": "Two Sigma Investments", "activism_level": "often"},
+    "0000315066": {"name": "FMR LLC (Fidelity)", "activism_level": "occasional"},
+    "0000080255": {"name": "T. Rowe Price Associates", "activism_level": "occasional"},
+    "0001423053": {"name": "Citadel Advisors", "activism_level": "often"},
+    "0001179392": {"name": "Two Sigma Investments", "activism_level": "often"},
     "0001037389": {"name": "Renaissance Technologies", "activism_level": "occasional"},
-    "0000355911": {"name": "Wellington Management", "activism_level": "often"},
-    "0000868154": {"name": "LSV Asset Management", "activism_level": "occasional"},
+    "0000902219": {"name": "Wellington Management", "activism_level": "often"},
+    "0001418814": {"name": "ValueAct Holdings", "activism_level": "often"},
+    "0001336528": {"name": "Pershing Square Capital", "activism_level": "often"},
+    "0001088875": {"name": "Baillie Gifford & Co", "activism_level": "occasional"},
+    "0001050470": {"name": "LSV Asset Management", "activism_level": "occasional"},
 }
 
 # 机构投资风格简化标签（3 类：Index / Active / Broker）
-# 映射逻辑：
-#   - Index: 已知指数基金管理人，持有大量被动产品
-#   - Broker: 经纪商/做市商实体（持仓可能是客户持有而非自营）
-#   - Active: 所有其他机构（无法细分 Value/Growth/GARP 等风格）
 INSTITUTION_STYLES = {
     "0000102909": "Index",       # Vanguard Group
-    "0001364742": "Index",       # BlackRock Fund Advisors
-    "0000093751": "Index",       # State Street (SSgA)
-    "0001423053": "Index",       # Geode Capital Management
-    "0000312769": "Active",      # JPMorgan Chase (无法细分)
-    "0000938836": "Active",      # FMR (Fidelity)
-    "0000769993": "Broker",      # Goldman Sachs & Co
-    "0001103804": "Broker",      # Morgan Stanley
-    "0001350694": "Active",      # T. Rowe Price
-    "0001061165": "Active",      # Baillie Gifford
-    "0001567619": "Active",      # Citadel Advisors
-    "0001037389": "Active",      # Renaissance Technologies
-    "0001166559": "Active",      # Dimensional Fund Advisors
-    "0000355911": "Active",      # Wellington Management
-    "0001418814": "Active",      # Invesco
-    "0000915002": "Index",       # Northern Trust
+    "0001364742": "Index",       # BlackRock
+    "0000093751": "Index",       # State Street
+    "0000073124": "Index",       # Northern Trust
+    "0001214717": "Index",       # Geode Capital Management
+    "0000895421": "Broker",      # Morgan Stanley
+    "0000886982": "Broker",      # Goldman Sachs Group
+    "0000315066": "Active",      # FMR LLC (Fidelity)
+    "0000080255": "Active",      # T. Rowe Price Associates
+    "0000354204": "Active",      # Dimensional Fund Advisors
+    "0000914208": "Active",      # Invesco
+    "0000820027": "Active",      # Ameriprise Financial
+    "0000038777": "Active",      # Franklin Resources
     "0000070858": "Active",      # Bank of America
-    "0001179392": "Active",      # Nuveen Asset Management
-    "0000312435": "Active",      # Franklin Resources
-    "0000893749": "Active",      # AllianceBernstein
-    "0000868154": "Active",      # LSV Asset Management
-    "0001688453": "Active",      # Two Sigma Investments
-    "0001178453": "Index",       # Legal & General
-    "0001336528": "Active",      # Ameriprise Financial
+    "0000019617": "Active",      # JPMorgan Chase
+    "0001088875": "Active",      # Baillie Gifford & Co
+    "0001521019": "Active",      # Nuveen Asset Management
+    "0001109448": "Active",      # AllianceBernstein
+    "0001050470": "Active",      # LSV Asset Management
+    "0000764068": "Active",      # Legal & General Group
+    "0001037389": "Active",      # Renaissance Technologies
+    "0001423053": "Active",      # Citadel Advisors
+    "0001179392": "Active",      # Two Sigma Investments
+    "0000902219": "Active",      # Wellington Management
+    "0001350694": "Active",      # Bridgewater Associates
+    "0001103804": "Active",      # Viking Global Investors
+    "0001061165": "Active",      # Lone Pine Capital
+    "0001418814": "Active",      # ValueAct Holdings
+    "0001336528": "Active",      # Pershing Square Capital
     "0001067983": "Active",      # Berkshire Hathaway
+    "0001166559": "Active",      # Gates Foundation Trust
 }
