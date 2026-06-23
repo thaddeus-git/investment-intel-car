@@ -146,67 +146,77 @@ def collect_13f_holdings(conn):
     for inst_cik, inst_name in TOP_INSTITUTIONS.items():
         try:
             c = Company(inst_cik)
-            f13_list = list(c.get_filings(form="13F-HR").latest(2))
+            f13_list = list(c.get_filings(form="13F-HR").latest(4))
         except Exception as e:
             logger.warning("  Failed to get 13F for %s (%s): %s", inst_name, inst_cik, e)
             continue
 
         if not f13_list:
+            logger.debug("  %s: no 13F-HR filings", inst_name)
             continue
 
-        # Use the latest 13F
-        latest_filing = f13_list[0]
-
-        try:
-            tf = ThirteenF(latest_filing)
-        except Exception as e:
-            logger.warning("  ThirteenF parse error for %s: %s", inst_name, e)
-            continue
-
-        infotable = tf.infotable
-        if infotable is None or (hasattr(infotable, 'empty') and infotable.empty):
-            logger.debug("  %s: empty infotable", inst_name)
-            continue
-
-        report_period = str(tf.report_period)[:10] if hasattr(tf, 'report_period') and tf.report_period else ""
-
-        for _, row_data in infotable.iterrows():
-            ticker = str(row_data.get("Ticker", "")).strip().upper()
-            if ticker not in competitor_tickers:
-                continue
-
-            comp_ticker = ticker
-            company_id = competitor_cids.get(comp_ticker)
-            if not company_id:
-                continue
-
+        inst_holdings = 0
+        for f13 in f13_list:
             try:
-                conn.execute("""
-                    INSERT OR REPLACE INTO institutional_holdings
-                        (company_id, institution_name, institution_cik,
-                         filing_date, report_period, ticker, issuer_name,
-                         cusip, value_x1000, shares, share_type,
-                         investment_discretion, sole_voting, shared_voting, non_voting)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    company_id, inst_name, inst_cik,
-                    latest_filing.filing_date, report_period,
-                    ticker,
-                    str(row_data.get("Issuer", "")),
-                    str(row_data.get("Cusip", "")),
-                    float(row_data.get("Value", 0)),
-                    float(row_data.get("SharesPrnAmount", 0)),
-                    str(row_data.get("Type", "Shares")),
-                    str(row_data.get("InvestmentDiscretion", "")),
-                    float(row_data.get("SoleVoting", 0)),
-                    float(row_data.get("SharedVoting", 0)),
-                    float(row_data.get("NonVoting", 0)),
-                ))
-                total_new += 1
+                tf = ThirteenF(f13)
             except Exception as e:
-                logger.debug("  Insert holding error: %s", e)
+                logger.debug("  ThirteenF parse error for %s (%s): %s", inst_name, f13.filing_date, e)
+                continue
 
-        logger.info("  %s: %d competitor holdings found", inst_name, total_new)
+            infotable = tf.infotable
+            if infotable is None or (hasattr(infotable, 'empty') and infotable.empty):
+                continue
+
+            report_period = str(tf.report_period)[:10] if hasattr(tf, 'report_period') and tf.report_period else ""
+
+            for _, row_data in infotable.iterrows():
+                ticker = str(row_data.get("Ticker", "")).strip().upper()
+                if ticker not in competitor_tickers:
+                    continue
+
+                comp_ticker = ticker
+                company_id = competitor_cids.get(comp_ticker)
+                if not company_id:
+                    continue
+
+                try:
+                    # 同一机构的 13F 可能对同一 ticker 有多行（不同 sub-advisor /
+                    # investment discretion）。UNIQUE(institution_cik, report_period, ticker)
+                    # 要求一行，所以这里用累加 upsert 而非 REPLACE——否则只保留最后一行，
+                    # 严重低估持仓（如 FMR 的 CVNA 实际 ~$2.3B 会被压成最后一行 ~$891M）。
+                    conn.execute("""
+                        INSERT INTO institutional_holdings
+                            (company_id, institution_name, institution_cik,
+                             filing_date, report_period, ticker, issuer_name,
+                             cusip, value_x1000, shares, share_type,
+                             investment_discretion, sole_voting, shared_voting, non_voting)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(institution_cik, report_period, ticker) DO UPDATE SET
+                            value_x1000   = institutional_holdings.value_x1000   + excluded.value_x1000,
+                            shares        = institutional_holdings.shares        + excluded.shares,
+                            sole_voting   = institutional_holdings.sole_voting   + excluded.sole_voting,
+                            shared_voting = institutional_holdings.shared_voting + excluded.shared_voting,
+                            non_voting    = institutional_holdings.non_voting    + excluded.non_voting
+                    """, (
+                        company_id, inst_name, inst_cik,
+                        f13.filing_date, report_period,
+                        ticker,
+                        str(row_data.get("Issuer", "")),
+                        str(row_data.get("Cusip", "")),
+                        float(row_data.get("Value", 0)),
+                        float(row_data.get("SharesPrnAmount", 0)),
+                        str(row_data.get("Type", "Shares")),
+                        str(row_data.get("InvestmentDiscretion", "")),
+                        float(row_data.get("SoleVoting", 0)),
+                        float(row_data.get("SharedVoting", 0)),
+                        float(row_data.get("NonVoting", 0)),
+                    ))
+                    total_new += 1
+                    inst_holdings += 1
+                except Exception as e:
+                    logger.debug("  Insert holding error: %s", e)
+
+        logger.info("  %s: %d competitor holdings found across %d periods", inst_name, inst_holdings, len(f13_list))
 
     conn.commit()
     logger.info("13F collection done. %d total holdings written.", total_new)
